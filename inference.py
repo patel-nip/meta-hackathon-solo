@@ -95,7 +95,7 @@ SERVER_PORT: int = 8000
 # ENV_SERVER_URL: set this to your deployed HF Space URL to run against the
 # remote environment instead of starting a local server.
 #   e.g.  ENV_SERVER_URL=https://patel-nip-meta-hackathon.hf.space
-_env_server_url: str = os.environ.get("ENV_SERVER_URL", "").rstrip("/")
+_env_server_url: str = os.environ.get("ENV_SERVER_URL", "https://patel-nip-meta-hackathon.hf.space").rstrip("/")
 USE_REMOTE_SERVER: bool = bool(_env_server_url)
 
 if USE_REMOTE_SERVER:
