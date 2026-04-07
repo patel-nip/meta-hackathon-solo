@@ -1,0 +1,27 @@
+[INFO] Using remote environment: https://patel-nip-meta-hackathon.hf.space
+[START] task=easy env=ContextAwareEnv model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action=summarize_screen reward=1.00 done=true error=null episode_id=unknown
+[END] success=true steps=1 rewards=1.00 episode_id=unknown
+[START] task=medium env=ContextAwareEnv model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action=stay_silent reward=0.20 done=false error=null episode_id=unknown
+[STEP] step=2 action=stay_silent reward=0.20 done=false error=null episode_id=unknown
+[STEP] step=3 action=stay_silent reward=0.20 done=false error=null episode_id=unknown
+[STEP] step=4 action=stay_silent reward=0.20 done=false error=null episode_id=unknown
+[STEP] step=5 action=stay_silent reward=0.20 done=true error=null episode_id=unknown
+[END] success=true steps=5 rewards=0.20,0.20,0.20,0.20,0.20 episode_id=unknown
+[START] task=hard env=ContextAwareEnv model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action=proactive_help reward=1.00 done=true error=null episode_id=unknown
+[END] success=true steps=1 rewards=1.00 episode_id=unknown
+
+============================================================
+  INFERENCE SUMMARY
+============================================================
+Traceback (most recent call last):
+  File "E:\New folder\Hackathon\context_aware_env\inference.py", line 764, in <module>
+    run()
+  File "E:\New folder\Hackathon\context_aware_env\inference.py", line 747, in run
+    print(
+  File "C:\Program Files\Python311\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2713' in position 12: character maps to <undefined>

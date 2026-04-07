@@ -77,15 +77,37 @@ API_BASE_URL: str = os.environ.get(
 MODEL_NAME: str = os.environ.get(
     "MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct"
 )
-HF_TOKEN: str = os.environ.get("HF_TOKEN", "")
+# Read token from environment variable OR from `hf auth login` disk cache
+try:
+    from huggingface_hub import get_token
+    _cached_token = get_token()
+except ImportError:
+    _cached_token = None
+
+HF_TOKEN: str = os.environ.get("HF_TOKEN", "") or _cached_token or ""
 
 # ── Runtime constants ─────────────────────────────────────────────────────────
 
 TASKS: list[str] = ["easy", "medium", "hard"]
 MAX_STEPS: int = 8
 SERVER_PORT: int = 8000
-SERVER_URL: str = f"http://localhost:{SERVER_PORT}"
-WS_URL: str = f"ws://localhost:{SERVER_PORT}/ws"
+
+# ENV_SERVER_URL: set this to your deployed HF Space URL to run against the
+# remote environment instead of starting a local server.
+#   e.g.  ENV_SERVER_URL=https://patel-nip-meta-hackathon.hf.space
+_env_server_url: str = os.environ.get("ENV_SERVER_URL", "").rstrip("/")
+USE_REMOTE_SERVER: bool = bool(_env_server_url)
+
+if USE_REMOTE_SERVER:
+    SERVER_URL = _env_server_url
+    # HTTPS -> wss://, HTTP -> ws://
+    _ws_scheme = "wss" if SERVER_URL.startswith("https") else "ws"
+    _ws_host = SERVER_URL.split("://", 1)[1]
+    WS_URL = f"{_ws_scheme}://{_ws_host}/ws"
+else:
+    SERVER_URL = f"http://localhost:{SERVER_PORT}"
+    WS_URL = f"ws://localhost:{SERVER_PORT}/ws"
+
 ENV_NAME: str = "ContextAwareEnv"
 
 # ── Retry configuration for LLM calls ────────────────────────────────────────
@@ -693,8 +715,12 @@ def run() -> None:
         print("!" * 60 + "\n")
         sys.stdout.flush()
 
-    # ── Start the server ──────────────────────────────────────────────────
-    start_server()
+    # ── Start the server (skip if using a remote HF Space) ────────────────
+    if USE_REMOTE_SERVER:
+        print(f"[INFO] Using remote environment: {SERVER_URL}")
+        sys.stdout.flush()
+    else:
+        start_server()
 
     # ── Run all tasks in a single event loop ──────────────────────────────
     try:
@@ -703,7 +729,8 @@ def run() -> None:
         print(f"[ERROR] Fatal error during inference: {exc}", file=sys.stderr)
         summary = {}
     finally:
-        stop_server()
+        if not USE_REMOTE_SERVER:
+            stop_server()
 
     # ── Print summary report ──────────────────────────────────────────────
     print("\n" + "=" * 60)
@@ -716,7 +743,7 @@ def run() -> None:
 
     for task in TASKS:
         info = summary.get(task, {"success": False, "reward": 0.0, "steps": 0})
-        status = "✓ PASS" if info["success"] else "✗ FAIL"
+        status = "PASS" if info["success"] else "FAIL"
         print(
             f"  {task:8s}  {status}  "
             f"reward={info['reward']:.2f}  steps={info['steps']}"
