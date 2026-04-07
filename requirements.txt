@@ -1,0 +1,26 @@
+# ContextAwareEnv – Python Dependencies
+# ======================================
+#
+# Install with:  pip install -r requirements.txt
+#
+# These match the dependencies in pyproject.toml.  If you add a new
+# dependency, update BOTH files.
+
+# ── OpenEnv framework (provides Environment, EnvClient, create_fastapi_app) ──
+openenv-core>=0.2.0
+
+# ── Web server ────────────────────────────────────────────────────────────────
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
+# ── Data validation ──────────────────────────────────────────────────────────
+pydantic>=2.0.0
+
+# ── LLM API client (OpenAI-compatible, used for HuggingFace Inference) ───────
+openai>=1.0.0
+
+# ── WebSocket client (used by inference.py and tests) ────────────────────────
+websockets>=12.0
+
+# ── HTTP client (used for health-check polling) ─────────────────────────────
+httpx>=0.25.0

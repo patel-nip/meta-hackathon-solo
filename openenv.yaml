@@ -1,0 +1,13 @@
+name: context-aware-env
+version: 1.0.0
+description: >
+  A social-awareness RL environment that evaluates whether an LLM agent
+  knows when to stay silent and when to proactively interrupt to help.
+  Simulates a user's desktop OS with three difficulty tiers:
+  easy (explicit help request), medium (deep work / stay silent),
+  and hard (unspoken frustration / proactive help).
+author: hackathon-team
+entrypoint: server/app.py
+docker:
+  dockerfile: server/Dockerfile
+  port: 8000
