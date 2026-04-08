@@ -10,7 +10,7 @@ This package contains:
 """
 
 try:
-    from server.environment import ContextAwareEnvironment  # noqa: F401
+    from .environment import ContextAwareEnvironment  # noqa: F401
 except ImportError:
     pass  # Fine during import resolution or pip install
 
