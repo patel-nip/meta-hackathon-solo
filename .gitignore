@@ -29,8 +29,6 @@ env/
 Thumbs.db
 desktop.ini
 
-# ── Lock files (large, auto-generated) ───────────────────────────────────────
-uv.lock
 
 # ── Environment / Secrets ────────────────────────────────────────────────────
 .env

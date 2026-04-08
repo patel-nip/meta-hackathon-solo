@@ -61,6 +61,23 @@ MEDIUM_SILENT_TURNS_REQUIRED: int = 5
 MEDIUM_PER_TURN_REWARD: float = 0.2
 """Reward given for each successful silent turn in the 'medium' task."""
 
+SCORE_EPSILON: float = 0.01
+"""Small offset to keep scores strictly inside (0, 1) as required by the
+Meta x Scaler evaluation platform."""
+
+
+def _clamp_score(raw: float) -> float:
+    """Clamp *raw* into the open interval (0, 1).
+
+    The grading pipeline rejects scores that are exactly 0.0 or 1.0,
+    so we nudge boundary values inward by ``SCORE_EPSILON``.
+    """
+    if raw <= 0.0:
+        return SCORE_EPSILON
+    if raw >= 1.0:
+        return 1.0 - SCORE_EPSILON
+    return raw
+
 
 # ── Task presets ──────────────────────────────────────────────────────────────
 
@@ -184,7 +201,7 @@ class ContextAwareEnvironment(
 
         return ContextObservation(
             done=False,
-            reward=0.0,
+            reward=SCORE_EPSILON,
             **self._current_obs_kwargs,
         )
 
@@ -219,7 +236,7 @@ class ContextAwareEnvironment(
             )
             return ContextObservation(
                 done=True,
-                reward=0.0,
+                reward=SCORE_EPSILON,
                 **self._current_obs_kwargs,
             )
 
@@ -233,7 +250,7 @@ class ContextAwareEnvironment(
             self._episode_done = True
             return ContextObservation(
                 done=True,
-                reward=0.0,
+                reward=SCORE_EPSILON,
                 **self._current_obs_kwargs,
             )
 
@@ -303,6 +320,7 @@ class ContextAwareEnvironment(
             done = True
 
         # ── Finalise ──────────────────────────────────────────────────────
+        reward = _clamp_score(reward)
         self._episode_done = done
 
         logger.debug(
