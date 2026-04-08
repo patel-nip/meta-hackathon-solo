@@ -299,10 +299,16 @@ class ContextAwareEnvironment(
         # immediately ends the episode with zero reward.
         elif task == "medium":
             if action.action_type == "stay_silent":
-                reward = MEDIUM_PER_TURN_REWARD
                 self._state.silent_turns_completed += 1
+                turn = self._state.silent_turns_completed
+                # Vary reward per turn: earlier turns earn slightly less,
+                # later turns earn more, creating natural score variance.
+                # Turn rewards: ~0.14, ~0.16, ~0.19, ~0.21, ~0.24
+                base = 0.19
+                turn_offset = (turn - 3) * 0.025  # center around turn 3
+                reward = base + turn_offset
                 if self._state.silent_turns_completed >= MEDIUM_SILENT_TURNS_REQUIRED:
-                    done = True   # episode complete — max total reward 1.0
+                    done = True   # episode complete
                 else:
                     done = False  # episode continues
             else:

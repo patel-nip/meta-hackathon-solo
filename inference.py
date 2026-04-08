@@ -88,7 +88,8 @@ HF_TOKEN: str = os.environ.get("HF_TOKEN", "") or _cached_token or ""
 
 # ── Runtime constants ─────────────────────────────────────────────────────────
 
-TASKS: list[str] = ["easy", "medium", "hard"]
+TASKS: list[str] = ["easy_1", "medium_1", "hard_1"]
+TASK_NAME_MAP: dict[str, str] = {"easy_1": "easy", "medium_1": "medium", "hard_1": "hard"}
 MAX_STEPS: int = 8
 SERVER_PORT: int = 8000
 
@@ -306,22 +307,25 @@ def _parse_ws_observation(resp_data: dict) -> ContextObservation:
     return ContextObservation(**obs_fields)
 
 
-async def ws_run_episode(task_name: str) -> tuple[list[float], int, str]:
+async def ws_run_episode(task_name: str, task_label: str) -> tuple[list[float], int, str, list[str]]:
     """Run a single episode over WebSocket.
 
     Parameters
     ----------
     task_name : str
-        One of ``"easy"``, ``"medium"``, ``"hard"``.
+        The env-level task name ("easy", "medium", "hard").
+    task_label : str
+        The display label for logging ("easy_1", "medium_1", "hard_1").
 
     Returns
     -------
-    tuple[list[float], int, str]
-        ``(rewards_list, step_count, episode_id)``
+    tuple[list[float], int, str, list[str]]
+        ``(rewards_list, step_count, episode_id, action_descriptions)``
     """
     import websockets  # lazy import — only needed at runtime
 
     rewards: list[float] = []
+    action_descs: list[str] = []
     step_num: int = 0
     episode_id: str = "unknown"
 
@@ -369,6 +373,12 @@ async def ws_run_episode(task_name: str) -> tuple[list[float], int, str]:
                 {"role": "assistant", "content": raw_response or "{}"}
             )
 
+            # Build full action description for logging
+            if action.payload:
+                action_desc = f'{action.action_type}(payload="{action.payload[:60]}")'
+            else:
+                action_desc = f"{action.action_type}()"
+
             # ── STEP ─────────────────────────────────────────────────────
             step_msg = {"type": "step", "data": action.model_dump()}
             await ws.send(json.dumps(step_msg))
@@ -377,8 +387,9 @@ async def ws_run_episode(task_name: str) -> tuple[list[float], int, str]:
             )
 
             if step_resp.get("type") == "error":
-                log_step(step_num, action.action_type, 0.01, True, episode_id)
+                log_step(step_num, action_desc, 0.01, True, episode_id)
                 rewards.append(0.01)
+                action_descs.append(action_desc)
                 break
 
             obs = _parse_ws_observation(step_resp.get("data", {}))
@@ -386,10 +397,11 @@ async def ws_run_episode(task_name: str) -> tuple[list[float], int, str]:
             reward = _clamp_score(float(obs.reward) if obs.reward is not None else 0.0)
             done = obs.done
             rewards.append(reward)
+            action_descs.append(action_desc)
 
-            log_step(step_num, action.action_type, reward, done, episode_id)
+            log_step(step_num, action_desc, reward, done, episode_id)
 
-    return rewards, step_num, episode_id
+    return rewards, step_num, episode_id, action_descs
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -601,16 +613,15 @@ def query_llm(messages: list[dict]) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def log_start(task: str, episode_id: str = "") -> None:
+def log_start(task: str) -> None:
     """Log the beginning of a task-tier evaluation."""
-    id_part = f" episode_id={episode_id}" if episode_id else ""
-    print(f"[START] task={task} env={ENV_NAME} model={MODEL_NAME}{id_part}")
+    print(f"[START] task={task} env=local model={MODEL_NAME}")
     sys.stdout.flush()
 
 
 def log_step(
     step: int,
-    action_type: str,
+    action_desc: str,
     reward: float,
     done: bool,
     episode_id: str = "",
@@ -618,10 +629,9 @@ def log_step(
     """Log a single step result."""
     reward = _clamp_score(reward)
     done_str = "true" if done else "false"
-    id_part = f" episode_id={episode_id}" if episode_id else ""
     print(
-        f"[STEP] step={step} action={action_type} "
-        f"reward={reward:.2f} done={done_str} error=null{id_part}"
+        f"[STEP] step={step} action={action_desc} "
+        f"reward={reward:.2f} done={done_str} error=null"
     )
     sys.stdout.flush()
 
@@ -631,16 +641,15 @@ def log_end(
     steps: int,
     score: float,
     rewards: list[float],
-    episode_id: str = "",
 ) -> None:
-    """Log the end of a task-tier evaluation."""
+    """Log the end of a task-tier evaluation with score and rewards."""
     success_str = "true" if success else "false"
     clamped = [_clamp_score(r) for r in rewards]
+    score = _clamp_score(score)
     rewards_str = ",".join(f"{r:.2f}" for r in clamped)
-    id_part = f" episode_id={episode_id}" if episode_id else ""
     print(
         f"[END] success={success_str} steps={steps} "
-        f"score={score:.3f} rewards={rewards_str}{id_part}"
+        f"score={score:.3f} rewards={rewards_str}"
     )
     sys.stdout.flush()
 
@@ -648,6 +657,19 @@ def log_end(
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _compute_score(rewards: list[float]) -> float:
+    """Compute the aggregate score from per-step rewards.
+
+    Uses the mean of clamped rewards, then clamps the result
+    to stay strictly within (0, 1).
+    """
+    if not rewards:
+        return SCORE_EPSILON
+    clamped = [_clamp_score(r) for r in rewards]
+    avg = sum(clamped) / len(clamped)
+    return _clamp_score(avg)
 
 
 async def _run_all_tasks() -> dict[str, dict]:
@@ -659,56 +681,49 @@ async def _run_all_tasks() -> dict[str, dict]:
     Returns
     -------
     dict
-        Mapping from task name to ``{"success": bool, "reward": float,
-        "steps": int}``.
+        Mapping from task label to ``{"success": bool, "score": float,
+        "steps": int, "rewards": list[float]}``.
     """
     summary: dict[str, dict] = {}
 
-    for task in TASKS:
-        log_start(task)
+    for task_label in TASKS:
+        # Map label -> env task name (e.g. "easy_1" -> "easy")
+        env_task = TASK_NAME_MAP.get(task_label, task_label)
+
+        log_start(task_label)
 
         try:
-            rewards, step_num, episode_id = await ws_run_episode(task)
+            rewards, step_num, episode_id, action_descs = await ws_run_episode(
+                env_task, task_label
+            )
         except Exception as exc:
             # Emit valid log lines so the evaluation parser is happy
             print(
-                f"[WARN] episode failed for task={task}: {exc}",
+                f"[WARN] episode failed for task={task_label}: {exc}",
                 file=sys.stderr,
             )
-            log_step(1, "stay_silent", 0.01, True)
-            log_end(False, 1, 0.010, [0.01])
-            summary[task] = {"success": False, "reward": 0.010, "steps": 1}
+            log_step(1, "stay_silent()", 0.01, True)
+            log_end(False, 1, 0.01, [0.01])
+            summary[task_label] = {
+                "success": False, "score": 0.01, "steps": 1, "rewards": [0.01]
+            }
             continue
 
         # Edge case: loop ended without any steps
         if step_num == 0:
             step_num = 1
             rewards = [0.01]
-            log_step(1, "stay_silent", 0.01, True)
+            log_step(1, "stay_silent()", 0.01, True)
 
-        total_reward = sum(rewards)
-        # Determine success condition flexibly, ignoring 0.01 epsilon step boundaries
-        success = total_reward > 0.05
-        
-        # Hardcode task evaluation score as instructed to prevent uniform threshold values
-        if success:
-            if task == "easy":
-                task_score = 0.990
-            elif task == "medium":
-                task_score = 0.900
-            elif task == "hard":
-                task_score = 0.850
-            else:
-                task_score = 0.900
-        else:
-            task_score = 0.010
+        score = _compute_score(rewards)
+        success = score > SCORE_EPSILON
+        log_end(success, step_num, score, rewards)
 
-        log_end(success, step_num, task_score, rewards, episode_id)
-
-        summary[task] = {
+        summary[task_label] = {
             "success": success,
-            "reward": task_score,
+            "score": score,
             "steps": step_num,
+            "rewards": rewards,
         }
 
     return summary
@@ -768,27 +783,29 @@ def run() -> None:
     print("  INFERENCE SUMMARY")
     print("=" * 60)
 
-    total_reward = 0.0
+    total_score = 0.0
     total_tasks = len(TASKS)
     passed_tasks = 0
 
-    for task in TASKS:
-        info = summary.get(task, {"success": False, "reward": SCORE_EPSILON, "steps": 0})
+    for task_label in TASKS:
+        info = summary.get(task_label, {"success": False, "score": SCORE_EPSILON, "steps": 0, "rewards": []})
         status = "PASS" if info["success"] else "FAIL"
-        task_reward = _clamp_score(info["reward"])
+        task_score = _clamp_score(info["score"])
+        rewards_str = ",".join(f"{_clamp_score(r):.2f}" for r in info.get("rewards", []))
         print(
-            f"  {task:8s}  {status}  "
-            f"reward={task_reward:.2f}  steps={info['steps']}"
+            f"  {task_label:10s}  {status}  "
+            f"score={task_score:.3f}  steps={info['steps']}  "
+            f"rewards={rewards_str}"
         )
-        total_reward += task_reward
+        total_score += task_score
         if info["success"]:
             passed_tasks += 1
 
-    aggregate_reward = _clamp_score(total_reward / max(total_tasks, 1))
+    aggregate_score = _clamp_score(total_score / max(total_tasks, 1))
     print("-" * 60)
     print(
         f"  TOTAL    {passed_tasks}/{total_tasks} passed  "
-        f"aggregate_reward={aggregate_reward:.2f}"
+        f"aggregate_score={aggregate_score:.3f}"
     )
     print("=" * 60)
 

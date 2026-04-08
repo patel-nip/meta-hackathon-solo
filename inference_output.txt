@@ -1,25 +1,25 @@
 [INFO] Server healthy after 1 poll
-[START] task=easy env=ContextAwareEnv model=Qwen/Qwen2.5-72B-Instruct
-[STEP] step=1 action=summarize_screen reward=0.92 done=true error=null episode_id=unknown
-[END] success=true steps=1 score=0.990 rewards=0.92 episode_id=unknown
-[START] task=medium env=ContextAwareEnv model=Qwen/Qwen2.5-72B-Instruct
-[STEP] step=1 action=stay_silent reward=0.19 done=false error=null episode_id=unknown
-[STEP] step=2 action=stay_silent reward=0.19 done=false error=null episode_id=unknown
-[STEP] step=3 action=stay_silent reward=0.19 done=false error=null episode_id=unknown
-[STEP] step=4 action=stay_silent reward=0.19 done=false error=null episode_id=unknown
-[STEP] step=5 action=stay_silent reward=0.19 done=true error=null episode_id=unknown
-[END] success=true steps=5 score=0.900 rewards=0.19,0.19,0.19,0.19,0.19 episode_id=unknown
-[START] task=hard env=ContextAwareEnv model=Qwen/Qwen2.5-72B-Instruct
-[STEP] step=1 action=proactive_help reward=0.67 done=true error=null episode_id=unknown
-[END] success=true steps=1 score=0.850 rewards=0.67 episode_id=unknown
-[INFO] Stopping server …
+[START] task=easy_1 env=local model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action=summarize_screen(payload="You are currently watching a video titled 'React Tutorial' o") reward=0.85 done=true error=null
+[END] success=true steps=1 score=0.847 rewards=0.85
+[START] task=medium_1 env=local model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action=stay_silent() reward=0.14 done=false error=null
+[STEP] step=2 action=stay_silent() reward=0.17 done=false error=null
+[STEP] step=3 action=stay_silent() reward=0.19 done=false error=null
+[STEP] step=4 action=stay_silent() reward=0.21 done=false error=null
+[STEP] step=5 action=stay_silent() reward=0.24 done=true error=null
+[END] success=true steps=5 score=0.190 rewards=0.14,0.17,0.19,0.21,0.24
+[START] task=hard_1 env=local model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action=proactive_help(payload="It looks like you're encountering an npm lifecycle error (co") reward=0.71 done=true error=null
+[END] success=true steps=1 score=0.706 rewards=0.71
+[INFO] Stopping server Ã 
 
 ============================================================
   INFERENCE SUMMARY
 ============================================================
-  easy      PASS  reward=0.99  steps=1
-  medium    PASS  reward=0.90  steps=5
-  hard      PASS  reward=0.85  steps=1
+  easy_1      PASS  score=0.847  steps=1  rewards=0.85
+  medium_1    PASS  score=0.190  steps=5  rewards=0.14,0.17,0.19,0.21,0.24
+  hard_1      PASS  score=0.706  steps=1  rewards=0.71
 ------------------------------------------------------------
-  TOTAL    3/3 passed  aggregate_reward=0.91
+  TOTAL    3/3 passed  aggregate_score=0.581
 ============================================================
