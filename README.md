@@ -34,12 +34,19 @@ the socially-appropriate action.
 
 ### Scoring Details
 
-| Action                              | Easy  | Medium (per turn) | Hard          |
-|-------------------------------------|-------|--------------------|---------------|
-| `summarize_screen`                  | +1.0  | 0.0 (fail)         | 0.0           |
-| `stay_silent`                       | 0.0   | +0.2               | 0.0           |
-| `proactive_help` + specific error   | 0.0   | 0.0 (fail)         | +1.0          |
-| `proactive_help` + generic payload  | 0.0   | 0.0 (fail)         | +0.5 (partial)|
+Scores are **continuous** — they depend on the quality of the agent's response,
+not just a binary correct/incorrect check:
+
+| Action                              | Easy           | Medium (per turn) | Hard               |
+|-------------------------------------|----------------|--------------------|--------------------|
+| `summarize_screen`                  | 0.4–0.99       | 0.0 (fail)         | 0.0                |
+| `stay_silent`                       | 0.0            | 0.14–0.24          | 0.0                |
+| `proactive_help` + specific error   | 0.0            | 0.0 (fail)         | 0.6–0.99           |
+| `proactive_help` + generic payload  | 0.0            | 0.0 (fail)         | 0.4–0.6 (partial)  |
+
+- **Easy** rewards are based on payload similarity to the screen context + response length quality.
+- **Medium** rewards increase per turn (earlier turns earn less, later turns earn more).
+- **Hard** rewards combine keyword detection (npm, error) with fuzzy text matching.
 
 ---
 
@@ -188,12 +195,12 @@ openenv validate
 
 ## 📝 Log Format
 
-The `inference.py` script outputs structured lines for the evaluation parser:
+The `inference.py` script outputs structured lines for the automated evaluation parser:
 
 ```
-[START] task=easy env=ContextAwareEnv model=Qwen/Qwen2.5-72B-Instruct
-[STEP]  step=1 action=summarize_screen reward=1.00 done=true error=null episode_id=abc123
-[END]   success=true steps=1 rewards=1.00 episode_id=abc123
+[START] task=easy_1 env=local model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action=summarize_screen(task=easy) reward=0.85 done=true error=null
+[END] success=true steps=1 score=0.847 rewards=0.85
 ```
 
 After all tasks, a summary report is printed:
@@ -202,11 +209,11 @@ After all tasks, a summary report is printed:
 ============================================================
   INFERENCE SUMMARY
 ============================================================
-  easy      ✓ PASS  reward=1.00  steps=1
-  medium    ✓ PASS  reward=1.00  steps=5
-  hard      ✓ PASS  reward=1.00  steps=1
+  easy_1      PASS  score=0.847  steps=1  rewards=0.85
+  medium_1    PASS  score=0.190  steps=5  rewards=0.14,0.17,0.19,0.21,0.24
+  hard_1      PASS  score=0.706  steps=1  rewards=0.71
 ------------------------------------------------------------
-  TOTAL    3/3 passed  aggregate_reward=3.00
+  TOTAL    3/3 passed  aggregate_score=0.581
 ============================================================
 ```
 

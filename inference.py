@@ -373,11 +373,8 @@ async def ws_run_episode(task_name: str, task_label: str) -> tuple[list[float], 
                 {"role": "assistant", "content": raw_response or "{}"}
             )
 
-            # Build full action description for logging
-            if action.payload:
-                action_desc = f'{action.action_type}(payload="{action.payload[:60]}")'
-            else:
-                action_desc = f"{action.action_type}()"
+            # Build action description for logging (clean, no payload dump)
+            action_desc = f"{action.action_type}(task={task_name})"
 
             # ── STEP ─────────────────────────────────────────────────────
             step_msg = {"type": "step", "data": action.model_dump()}
