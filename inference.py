@@ -95,18 +95,18 @@ SERVER_PORT: int = 8000
 # ENV_SERVER_URL: set this to your deployed HF Space URL to run against the
 # remote environment instead of starting a local server.
 #   e.g.  ENV_SERVER_URL=https://patel-nip-meta-hackathon.hf.space
-_env_server_url: str = os.environ.get("ENV_SERVER_URL", "").rstrip("/")
+_env_server_url: str = os.environ.get("ENV_SERVER_URL", "https://patel-nip-meta-hackathon.hf.space").rstrip("/")
 USE_REMOTE_SERVER: bool = bool(_env_server_url)
 
-# if USE_REMOTE_SERVER:
-#     SERVER_URL = _env_server_url
-#     # HTTPS -> wss://, HTTP -> ws://
-#     _ws_scheme = "wss" if SERVER_URL.startswith("https") else "ws"
-#     _ws_host = SERVER_URL.split("://", 1)[1]
-#     WS_URL = f"{_ws_scheme}://{_ws_host}/ws"
-# else:
-SERVER_URL = f"http://localhost:{SERVER_PORT}"
-WS_URL = f"ws://localhost:{SERVER_PORT}/ws"
+if USE_REMOTE_SERVER:
+    SERVER_URL = _env_server_url
+    # HTTPS -> wss://, HTTP -> ws://
+    _ws_scheme = "wss" if SERVER_URL.startswith("https") else "ws"
+    _ws_host = SERVER_URL.split("://", 1)[1]
+    WS_URL = f"{_ws_scheme}://{_ws_host}/ws"
+else:
+    SERVER_URL = f"http://localhost:{SERVER_PORT}"
+    WS_URL = f"ws://localhost:{SERVER_PORT}/ws"
 
 ENV_NAME: str = "ContextAwareEnv"
 
