@@ -58,7 +58,7 @@ MAX_STEPS_PER_EPISODE: int = 20
 MEDIUM_SILENT_TURNS_REQUIRED: int = 5
 """Number of consecutive silent turns needed to complete the 'medium' task."""
 
-MEDIUM_PER_TURN_REWARD: float = 0.2
+MEDIUM_PER_TURN_REWARD: float = 0.19
 """Reward given for each successful silent turn in the 'medium' task."""
 
 SCORE_EPSILON: float = 0.01

@@ -92,6 +92,19 @@ TASKS: list[str] = ["easy", "medium", "hard"]
 MAX_STEPS: int = 8
 SERVER_PORT: int = 8000
 
+# ── Score clamping ────────────────────────────────────────────────────────────
+# The Meta x Scaler grading pipeline rejects scores exactly 0.0 or 1.0.
+# Every score must be strictly in the open interval (0, 1).
+SCORE_EPSILON: float = 0.01
+
+def _clamp_score(raw: float) -> float:
+    """Clamp *raw* into the open interval (0, 1)."""
+    if raw <= 0.0:
+        return SCORE_EPSILON
+    if raw >= 1.0:
+        return 1.0 - SCORE_EPSILON
+    return raw
+
 # ENV_SERVER_URL: set this to your deployed HF Space URL to run against the
 # remote environment instead of starting a local server.
 #   e.g.  ENV_SERVER_URL=https://patel-nip-meta-hackathon.hf.space
@@ -288,7 +301,7 @@ def _parse_ws_observation(resp_data: dict) -> ContextObservation:
     ContextObservation
     """
     obs_fields: dict = dict(resp_data.get("observation", {}))
-    obs_fields["reward"] = resp_data.get("reward", 0.0)
+    obs_fields["reward"] = _clamp_score(float(resp_data.get("reward", 0.0)))
     obs_fields["done"] = resp_data.get("done", False)
     return ContextObservation(**obs_fields)
 
@@ -370,7 +383,7 @@ async def ws_run_episode(task_name: str) -> tuple[list[float], int, str]:
 
             obs = _parse_ws_observation(step_resp.get("data", {}))
 
-            reward = float(obs.reward) if obs.reward is not None else 0.0
+            reward = _clamp_score(float(obs.reward) if obs.reward is not None else 0.0)
             done = obs.done
             rewards.append(reward)
 
@@ -603,6 +616,7 @@ def log_step(
     episode_id: str = "",
 ) -> None:
     """Log a single step result."""
+    reward = _clamp_score(reward)
     done_str = "true" if done else "false"
     id_part = f" episode_id={episode_id}" if episode_id else ""
     print(
@@ -620,7 +634,8 @@ def log_end(
 ) -> None:
     """Log the end of a task-tier evaluation."""
     success_str = "true" if success else "false"
-    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    clamped = [_clamp_score(r) for r in rewards]
+    rewards_str = ",".join(f"{r:.2f}" for r in clamped)
     id_part = f" episode_id={episode_id}" if episode_id else ""
     print(
         f"[END] success={success_str} steps={steps} "
@@ -670,13 +685,8 @@ async def _run_all_tasks() -> dict[str, dict]:
             rewards = [0.01]
             log_step(1, "stay_silent", 0.01, True)
 
-        total_reward = sum(rewards)
-        # Clamp into (0, 1) — the grading pipeline rejects exactly 0.0 / 1.0
-        if total_reward <= 0.0:
-            total_reward = 0.01
-        elif total_reward >= 1.0:
-            total_reward = 0.99
-        success = total_reward > 0.01
+        total_reward = _clamp_score(sum(rewards))
+        success = total_reward > SCORE_EPSILON
         log_end(success, step_num, rewards, episode_id)
 
         summary[task] = {
@@ -747,20 +757,22 @@ def run() -> None:
     passed_tasks = 0
 
     for task in TASKS:
-        info = summary.get(task, {"success": False, "reward": 0.0, "steps": 0})
+        info = summary.get(task, {"success": False, "reward": SCORE_EPSILON, "steps": 0})
         status = "PASS" if info["success"] else "FAIL"
+        task_reward = _clamp_score(info["reward"])
         print(
             f"  {task:8s}  {status}  "
-            f"reward={info['reward']:.2f}  steps={info['steps']}"
+            f"reward={task_reward:.2f}  steps={info['steps']}"
         )
-        total_reward += info["reward"]
+        total_reward += task_reward
         if info["success"]:
             passed_tasks += 1
 
+    aggregate_reward = _clamp_score(total_reward / max(total_tasks, 1))
     print("-" * 60)
     print(
         f"  TOTAL    {passed_tasks}/{total_tasks} passed  "
-        f"aggregate_reward={total_reward:.2f}"
+        f"aggregate_reward={aggregate_reward:.2f}"
     )
     print("=" * 60)
 
