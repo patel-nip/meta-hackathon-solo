@@ -24,6 +24,7 @@ Design Decisions
 
 from __future__ import annotations
 
+import difflib
 import logging
 from typing import Any, Optional
 from uuid import uuid4
@@ -64,6 +65,13 @@ MEDIUM_PER_TURN_REWARD: float = 0.19
 SCORE_EPSILON: float = 0.01
 """Small offset to keep scores strictly inside (0, 1) as required by the
 Meta x Scaler evaluation platform."""
+
+
+def fuzzy_match_score(predicted: str, reference: str) -> float:
+    """Calculate a continuous string similarity score between 0.0 and 1.0."""
+    if not predicted:
+        return 0.0
+    return difflib.SequenceMatcher(None, predicted.lower(), reference.lower()).ratio()
 
 
 def _clamp_score(raw: float) -> float:
@@ -267,7 +275,18 @@ class ContextAwareEnvironment(
         # Any other action scores zero.
         if task == "easy":
             if action.action_type == "summarize_screen":
-                reward = 1.0
+                base_reward = 0.4
+                # similarity gives up to 0.4
+                sim_score = fuzzy_match_score(
+                    action.payload, 
+                    "watching react tutorial video on youtube"
+                ) * 0.4
+                
+                # word count penalty if too short or too long
+                length = len(action.payload.split())
+                len_bonus = 0.2 if 5 <= length <= 25 else 0.0
+                
+                reward = base_reward + sim_score + len_bonus
             else:
                 reward = 0.0
             done = True
@@ -298,17 +317,24 @@ class ContextAwareEnvironment(
         # action is ``proactive_help`` with a payload that mentions the
         # specific error.
         #
-        # Scoring:
-        #   - proactive_help + mentions "npm" or "error" → 1.0
-        #   - proactive_help but generic payload           → 0.5  (partial)
-        #   - any other action                             → 0.0
+        # Scoring is dynamic for continuous variance:
+        #   - base score + fuzzy match + keyword checks
         elif task == "hard":
             if action.action_type == "proactive_help":
+                base_reward = 0.4
+                sim_score = fuzzy_match_score(
+                    action.payload, 
+                    "npm error code elifecycle in terminal"
+                ) * 0.4
+                
                 payload_lower = action.payload.lower()
-                if "npm" in payload_lower or "error" in payload_lower:
-                    reward = 1.0
-                else:
-                    reward = 0.5  # right idea, but too generic
+                kwd_bonus = 0.0
+                if "npm" in payload_lower: 
+                    kwd_bonus += 0.1
+                if "error" in payload_lower or "err" in payload_lower: 
+                    kwd_bonus += 0.1
+                
+                reward = base_reward + sim_score + kwd_bonus
             else:
                 reward = 0.0
             done = True
