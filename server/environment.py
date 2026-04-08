@@ -201,7 +201,7 @@ class ContextAwareEnvironment(
 
         return ContextObservation(
             done=False,
-            reward=SCORE_EPSILON,
+            reward=0.0,
             **self._current_obs_kwargs,
         )
 
@@ -236,7 +236,7 @@ class ContextAwareEnvironment(
             )
             return ContextObservation(
                 done=True,
-                reward=SCORE_EPSILON,
+                reward=0.0,
                 **self._current_obs_kwargs,
             )
 
@@ -250,7 +250,7 @@ class ContextAwareEnvironment(
             self._episode_done = True
             return ContextObservation(
                 done=True,
-                reward=SCORE_EPSILON,
+                reward=0.0,
                 **self._current_obs_kwargs,
             )
 
