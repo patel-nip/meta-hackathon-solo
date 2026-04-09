@@ -9,5 +9,5 @@ description: >
 author: hackathon-team
 entrypoint: server/app.py
 docker:
-  dockerfile: server/Dockerfile
+  dockerfile: Dockerfile
   port: 8000
