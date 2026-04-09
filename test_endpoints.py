@@ -305,12 +305,39 @@ ALL_TESTS = [
 ]
 
 
+def _check_server() -> bool:
+    """Pre-flight check: verify the server is reachable before running tests."""
+    import urllib.request
+    import urllib.error
+
+    try:
+        req = urllib.request.Request("http://localhost:8000/health")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            if resp.status == 200:
+                return True
+    except (urllib.error.URLError, OSError):
+        pass
+    return False
+
+
 async def main():
     """Run all tests, catching failures individually so one bad test
     doesn't block the rest."""
     print("\n" + "=" * 60)
     print("  CONTEXT-AWARE-ENV  TEST SUITE")
     print("=" * 60 + "\n")
+
+    # ── Pre-flight: ensure server is running ──────────────────────────
+    if not _check_server():
+        print("  ERROR: Server is not running at http://localhost:8000")
+        print("")
+        print("  Start the server first:")
+        print("    python -m uvicorn server.app:app --host 0.0.0.0 --port 8000")
+        print("")
+        print("-" * 60)
+        print("  0/0 tests run -- SERVER UNREACHABLE")
+        print("-" * 60 + "\n")
+        sys.exit(1)
 
     for test_fn in ALL_TESTS:
         try:
@@ -328,7 +355,7 @@ async def main():
     passed = sum(1 for _, ok, _ in _results if ok)
     total = len(_results)
     status = "ALL PASSED" if passed == total else f"{total - passed} FAILED"
-    print(f"  {passed}/{total} tests passed — {status}")
+    print(f"  {passed}/{total} tests passed -- {status}")
     print("-" * 60 + "\n")
 
     if passed < total:
