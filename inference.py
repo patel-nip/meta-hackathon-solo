@@ -37,6 +37,7 @@ is caught and defaults to a safe ``stay_silent`` action.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import atexit
 import json
@@ -149,6 +150,31 @@ SERVER_WAIT_TIMEOUT: float = float(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 DEFAULT_ACTION = ContextAction(action_type="stay_silent", payload="")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HARDCODED ACTIONS FOR --no-llm MODE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+NO_LLM_ACTIONS: dict[str, ContextAction] = {
+    "easy": ContextAction(
+        action_type="summarize_screen",
+        payload="The user is watching a React tutorial video on YouTube and needs help.",
+    ),
+    "medium": ContextAction(
+        action_type="stay_silent",
+        payload="",
+    ),
+    "hard": ContextAction(
+        action_type="proactive_help",
+        payload="It looks like you have an npm error in your terminal. Try running npm cache clean --force and then reinstall.",
+    ),
+}
+
+
+def get_no_llm_action(task_name: str) -> ContextAction:
+    """Return the hardcoded optimal action for a given task (no LLM needed)."""
+    return NO_LLM_ACTIONS.get(task_name, DEFAULT_ACTION)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -307,7 +333,9 @@ def _parse_ws_observation(resp_data: dict) -> ContextObservation:
     return ContextObservation(**obs_fields)
 
 
-async def ws_run_episode(task_name: str, task_label: str) -> tuple[list[float], int, str, list[str]]:
+async def ws_run_episode(
+    task_name: str, task_label: str, *, use_llm: bool = True
+) -> tuple[list[float], int, str, list[str]]:
     """Run a single episode over WebSocket.
 
     Parameters
@@ -356,22 +384,26 @@ async def ws_run_episode(task_name: str, task_label: str) -> tuple[list[float], 
         while not done and step_num < MAX_STEPS:
             step_num += 1
 
-            # Build the user prompt from the current observation
-            user_msg = build_user_message(obs)
-            messages.append({"role": "user", "content": user_msg})
+            if use_llm:
+                # Build the user prompt from the current observation
+                user_msg = build_user_message(obs)
+                messages.append({"role": "user", "content": user_msg})
 
-            # Query the LLM (with retry)
-            raw_response = query_llm(messages)
+                # Query the LLM (with retry)
+                raw_response = query_llm(messages)
 
-            # Parse the LLM output defensively
-            try:
-                action = parse_action(raw_response)
-            except Exception:
-                action = DEFAULT_ACTION
+                # Parse the LLM output defensively
+                try:
+                    action = parse_action(raw_response)
+                except Exception:
+                    action = DEFAULT_ACTION
 
-            messages.append(
-                {"role": "assistant", "content": raw_response or "{}"}
-            )
+                messages.append(
+                    {"role": "assistant", "content": raw_response or "{}"}
+                )
+            else:
+                # --no-llm mode: use hardcoded optimal action
+                action = get_no_llm_action(task_name)
 
             # Build action description for logging (clean, no payload dump)
             action_desc = f"{action.action_type}(task={task_name})"
@@ -669,7 +701,7 @@ def _compute_score(rewards: list[float]) -> float:
     return _clamp_score(avg)
 
 
-async def _run_all_tasks() -> dict[str, dict]:
+async def _run_all_tasks(*, use_llm: bool = True) -> dict[str, dict]:
     """Run all task tiers asynchronously and return a summary.
 
     This runs inside a single ``asyncio.run()`` call so the event loop
@@ -691,7 +723,7 @@ async def _run_all_tasks() -> dict[str, dict]:
 
         try:
             rewards, step_num, episode_id, action_descs = await ws_run_episode(
-                env_task, task_label
+                env_task, task_label, use_llm=use_llm
             )
         except Exception as exc:
             # Emit valid log lines so the evaluation parser is happy
@@ -726,15 +758,21 @@ async def _run_all_tasks() -> dict[str, dict]:
     return summary
 
 
-def run() -> None:
+def run(*, use_llm: bool = True) -> None:
     """Execute all three task tiers and log structured output.
 
     This is the main entry point.  It:
 
     1. Starts the FastAPI server as a subprocess.
-    2. Runs all task tiers (easy → medium → hard).
+    2. Runs all task tiers (easy -> medium -> hard).
     3. Prints a summary report with per-tier and aggregate results.
     4. Shuts down the server.
+
+    Parameters
+    ----------
+    use_llm : bool
+        If False, uses hardcoded optimal actions instead of querying
+        the LLM API (``--no-llm`` mode).
     """
     # ── Graceful Ctrl+C handling ──────────────────────────────────────────
     def _sigint_handler(sig, frame):
@@ -745,7 +783,7 @@ def run() -> None:
     signal.signal(signal.SIGINT, _sigint_handler)
 
     # ── Validate HF_TOKEN before wasting time ─────────────────────────────
-    if not HF_TOKEN:
+    if use_llm and not HF_TOKEN:
         print("\n" + "!" * 60)
         print("  WARNING: HF_TOKEN is not set!")
         print("  LLM calls will fail with 401 Unauthorized.")
@@ -758,6 +796,10 @@ def run() -> None:
         print("!" * 60 + "\n")
         sys.stdout.flush()
 
+    if not use_llm:
+        print("[INFO] Running in --no-llm mode (hardcoded optimal actions)")
+        sys.stdout.flush()
+
     # ── Start the server (skip if using a remote HF Space) ────────────────
     if USE_REMOTE_SERVER:
         print(f"[INFO] Using remote environment: {SERVER_URL}")
@@ -767,7 +809,7 @@ def run() -> None:
 
     # ── Run all tasks in a single event loop ──────────────────────────────
     try:
-        summary = asyncio.run(_run_all_tasks())
+        summary = asyncio.run(_run_all_tasks(use_llm=use_llm))
     except Exception as exc:
         print(f"[ERROR] Fatal error during inference: {exc}", file=sys.stderr)
         summary = {}
@@ -808,4 +850,14 @@ def run() -> None:
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser(
+        description="Inference script for the ContextAwareEnv.",
+    )
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        default=False,
+        help="Use hardcoded optimal actions instead of querying the LLM API.",
+    )
+    args = parser.parse_args()
+    run(use_llm=not args.no_llm)
