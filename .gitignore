@@ -9,6 +9,9 @@ dist/
 build/
 .eggs/
 
+# ── Leftover submodule (not part of submission) ──────────────────────────────
+meta-hackathon-round1/
+
 # ── Virtual environments ─────────────────────────────────────────────────────
 .venv/
 venv/

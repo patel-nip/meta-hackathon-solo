@@ -69,7 +69,7 @@ _results: list[tuple[str, bool, str]] = []
 
 def _record(name: str, passed: bool, detail: str = "") -> None:
     _results.append((name, passed, detail))
-    status = "✓ PASS" if passed else "✗ FAIL"
+    status = "  PASS" if passed else "* FAIL"
     msg = f"  {status}  {name}"
     if detail:
         msg += f"  ({detail})"
@@ -82,7 +82,7 @@ def _record(name: str, passed: bool, detail: str = "") -> None:
 
 
 async def test_easy_correct_action():
-    """Easy task: summarize_screen → reward=1.0, done=True."""
+    """Easy task: summarize_screen → reward in (0.4, 0.99], done=True."""
     import websockets
 
     test_name = "easy_correct_action"
@@ -100,13 +100,14 @@ async def test_easy_correct_action():
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
         obs = parse_obs(resp["data"])
 
-        assert obs.reward == 1.0, f"Expected reward 1.0, got {obs.reward}"
+        # Continuous scoring: base(0.4) + similarity*0.4 + length_bonus(0.2)
+        assert 0.4 <= obs.reward <= 0.99, f"Expected reward in [0.4, 0.99], got {obs.reward}"
         assert obs.done is True
         _record(test_name, True, f"reward={obs.reward}")
 
 
 async def test_medium_correct_actions():
-    """Medium task: 5x stay_silent → 0.2 each, total 1.0, done=True."""
+    """Medium task: 5x stay_silent → variable per-turn rewards, done=True."""
     import websockets
 
     test_name = "medium_correct_actions"
@@ -118,21 +119,22 @@ async def test_medium_correct_actions():
         assert obs.explicit_help_request is False
 
         total_reward = 0.0
+        # Per-turn rewards vary: ~0.14, ~0.165, ~0.19, ~0.215, ~0.24
         for i in range(5):
             action = ContextAction(action_type="stay_silent", payload="")
             await ws.send(json.dumps({"type": "step", "data": action.model_dump()}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
             obs = parse_obs(resp["data"])
-            assert obs.reward == 0.2, f"Step {i+1}: Expected 0.2, got {obs.reward}"
+            assert 0.10 <= obs.reward <= 0.30, f"Step {i+1}: Expected reward in [0.10, 0.30], got {obs.reward}"
             total_reward += obs.reward
 
         assert obs.done is True
-        assert abs(total_reward - 1.0) < 0.01, f"Total reward {total_reward} ≠ 1.0"
+        assert 0.85 <= total_reward <= 1.05, f"Total reward {total_reward} not in expected range"
         _record(test_name, True, f"total_reward={total_reward:.2f}")
 
 
 async def test_hard_correct_action():
-    """Hard task: proactive_help with 'npm error' → reward=1.0."""
+    """Hard task: proactive_help with 'npm error' → high reward."""
     import websockets
 
     test_name = "hard_correct_action"
@@ -151,7 +153,8 @@ async def test_hard_correct_action():
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
         obs = parse_obs(resp["data"])
 
-        assert obs.reward == 1.0, f"Expected reward 1.0, got {obs.reward}"
+        # Continuous scoring: base(0.4) + similarity*0.4 + npm_bonus(0.1) + error_bonus(0.1)
+        assert 0.6 <= obs.reward <= 0.99, f"Expected reward in [0.6, 0.99], got {obs.reward}"
         assert obs.done is True
         _record(test_name, True, f"reward={obs.reward}")
 
@@ -162,7 +165,7 @@ async def test_hard_correct_action():
 
 
 async def test_easy_wrong_action():
-    """Easy task: stay_silent (wrong) → reward=0.0, done=True."""
+    """Easy task: stay_silent (wrong) → reward=0.01 (clamped), done=True."""
     import websockets
 
     test_name = "easy_wrong_action"
@@ -176,13 +179,14 @@ async def test_easy_wrong_action():
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
         obs = parse_obs(resp["data"])
 
-        assert obs.reward == 0.0, f"Expected reward 0.0, got {obs.reward}"
+        # Wrong action: 0.0 clamped to 0.01 (SCORE_EPSILON)
+        assert obs.reward == 0.01, f"Expected reward 0.01 (clamped), got {obs.reward}"
         assert obs.done is True
         _record(test_name, True, f"reward={obs.reward}")
 
 
 async def test_medium_interrupted():
-    """Medium task: 2x stay_silent then proactive_help → reward=0.0 on fail."""
+    """Medium task: 2x stay_silent then proactive_help → reward=0.01 (clamped) on fail."""
     import websockets
 
     test_name = "medium_interrupted"
@@ -190,13 +194,13 @@ async def test_medium_interrupted():
         await ws.send(json.dumps({"type": "reset", "data": {"task_name": "medium"}}))
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
 
-        # Two successful silent turns
-        for _ in range(2):
+        # Two successful silent turns (variable per-turn rewards)
+        for i in range(2):
             action = ContextAction(action_type="stay_silent", payload="")
             await ws.send(json.dumps({"type": "step", "data": action.model_dump()}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
             obs = parse_obs(resp["data"])
-            assert obs.reward == 0.2
+            assert 0.10 <= obs.reward <= 0.30, f"Step {i+1}: reward {obs.reward} not in range"
 
         # Interrupt with proactive_help → should fail
         action = ContextAction(action_type="proactive_help", payload="need help?")
@@ -204,13 +208,14 @@ async def test_medium_interrupted():
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
         obs = parse_obs(resp["data"])
 
-        assert obs.reward == 0.0, f"Expected 0.0 on interrupt, got {obs.reward}"
+        # Wrong action: 0.0 clamped to 0.01
+        assert obs.reward == 0.01, f"Expected 0.01 on interrupt, got {obs.reward}"
         assert obs.done is True
         _record(test_name, True, "interruption correctly penalised")
 
 
 async def test_hard_generic_payload():
-    """Hard task: proactive_help but generic payload → reward=0.5."""
+    """Hard task: proactive_help but generic payload → partial reward."""
     import websockets
 
     test_name = "hard_generic_payload"
@@ -226,13 +231,14 @@ async def test_hard_generic_payload():
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
         obs = parse_obs(resp["data"])
 
-        assert obs.reward == 0.5, f"Expected 0.5 for generic help, got {obs.reward}"
+        # Generic payload: base(0.4) + similarity + no keyword bonuses → ~0.40-0.60
+        assert 0.40 <= obs.reward <= 0.60, f"Expected reward in [0.40, 0.60], got {obs.reward}"
         assert obs.done is True
         _record(test_name, True, f"reward={obs.reward}")
 
 
 async def test_hard_wrong_action():
-    """Hard task: stay_silent (wrong) → reward=0.0."""
+    """Hard task: stay_silent (wrong) → reward=0.01 (clamped)."""
     import websockets
 
     test_name = "hard_wrong_action"
@@ -245,7 +251,8 @@ async def test_hard_wrong_action():
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
         obs = parse_obs(resp["data"])
 
-        assert obs.reward == 0.0, f"Expected 0.0, got {obs.reward}"
+        # Wrong action: 0.0 clamped to 0.01
+        assert obs.reward == 0.01, f"Expected 0.01 (clamped), got {obs.reward}"
         assert obs.done is True
         _record(test_name, True, f"reward={obs.reward}")
 
