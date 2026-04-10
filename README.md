@@ -8,45 +8,82 @@ app_port: 8000
 pinned: false
 ---
 
-# ContextAwareEnv – Social Awareness RL Environment
+# ContextAwareEnv — Social Awareness RL Environment
 
-> **Meta × Scaler OpenEnv Hackathon**
+> **Meta × Scaler OpenEnv Hackathon — Phase 3 Submission**
 
-An OpenEnv-compliant reinforcement learning environment that evaluates whether
-an LLM agent possesses **social awareness** — specifically, knowing when to
-**stay silent** and when to **proactively interrupt** to help.
+A fully OpenEnv-compliant reinforcement learning environment that evaluates whether an LLM-powered desktop assistant possesses **social awareness** — specifically, knowing *when to stay silent* and *when to proactively interrupt* to help.
 
 ---
 
-## 🧠 Concept
+## 🧠 Core Concept
 
-The environment simulates a user's desktop operating system. The agent observes
-the screen state (active app, visible text, user telemetry) and must decide on
-the socially-appropriate action.
+Modern AI assistants must be more than just capable — they must be **socially intelligent**. An assistant that interrupts a developer in deep focus is just as problematic as one that ignores a user silently struggling with an error.
+
+**ContextAwareEnv** simulates a user's desktop operating system. The agent observes the screen state — active application, visible text, user telemetry, and explicit help requests — and must choose the socially-appropriate action at each timestep.
 
 ### Three Difficulty Tiers
 
-| Task       | Scenario                                                                    | Optimal Action                                   | Max Reward |
-|------------|-----------------------------------------------------------------------------|--------------------------------------------------|------------|
-| **Easy**   | User watches a YouTube tutorial and *explicitly asks for help*              | `summarize_screen`                               | 1.0        |
-| **Medium** | User is coding in VS Code with focused typing (deep work)                  | `stay_silent` × 5 turns                          | 1.0        |
-| **Hard**   | Terminal shows `npm ERR!` while user has erratic mouse (silent frustration) | `proactive_help` (mentioning "npm" or "error")   | 1.0        |
+| Task       | Scenario                                                                           | Optimal Action                                   |
+|------------|------------------------------------------------------------------------------------|--------------------------------------------------|
+| **Easy**   | User watches a YouTube tutorial and *explicitly asks for help*                     | `summarize_screen` — respond to the direct request |
+| **Medium** | User is coding in VS Code with focused typing (*deep work mode*)                  | `stay_silent` × 5 consecutive turns               |
+| **Hard**   | Terminal shows `npm ERR!` while user has erratic mouse movement (*silent frustration*) | `proactive_help` — mention the specific error      |
 
-### Scoring Details
+### Scoring Rubric
 
-Scores are **continuous** — they depend on the quality of the agent's response,
-not just a binary correct/incorrect check:
+All rewards are **continuous values in the open interval (0, 1)** — never exactly 0.0 or 1.0. This ensures meaningful gradient signal for RL training and satisfies the evaluation platform's strict score constraints.
 
 | Action                              | Easy           | Medium (per turn) | Hard               |
-|-------------------------------------|----------------|--------------------|--------------------|
-| `summarize_screen`                  | 0.4–0.99       | 0.0 (fail)         | 0.0                |
+|-------------------------------------|----------------|--------------------|--------------------| 
+| `summarize_screen`                  | 0.4–0.99       | 0.0 (instant fail) | 0.0                |
 | `stay_silent`                       | 0.0            | 0.14–0.24          | 0.0                |
-| `proactive_help` + specific error   | 0.0            | 0.0 (fail)         | 0.6–0.99           |
-| `proactive_help` + generic payload  | 0.0            | 0.0 (fail)         | 0.4–0.6 (partial)  |
+| `proactive_help` + specific error   | 0.0            | 0.0 (instant fail) | 0.6–0.99           |
+| `proactive_help` + generic payload  | 0.0            | 0.0 (instant fail) | 0.4–0.6 (partial)  |
 
-- **Easy** rewards are based on payload similarity to the screen context + response length quality.
-- **Medium** rewards increase per turn (earlier turns earn less, later turns earn more).
-- **Hard** rewards combine keyword detection (npm, error) with fuzzy text matching.
+**How scoring works per tier:**
+
+- **Easy** — Single-step. Reward is `base (0.4) + fuzzy similarity to screen context (up to 0.4) + length quality bonus (0.2)`. Summarising with relevant content scores high; wrong action scores 0.
+- **Medium** — Multi-step (5 turns). Each silent turn earns a small reward that increases with each turn (~0.14, 0.17, 0.19, 0.21, 0.24). The **task score is the sum** of all per-turn rewards, designed to reach ~0.95 for 5 correct turns. Any interruption immediately ends the episode with zero reward.
+- **Hard** — Single-step. Reward is `base (0.4) + fuzzy match to error description (up to 0.4) + keyword bonuses (up to 0.2 for mentioning "npm" and "error")`. Proactive help that references the specific error scores highest.
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    inference.py                          │
+│  ┌──────────┐    ┌────────────┐    ┌──────────────────┐ │
+│  │ LLM API  │◄──►│  Agent     │    │  Structured      │ │
+│  │ (HF/OAI) │    │  Loop      │───►│  Log Output      │ │
+│  └──────────┘    └─────┬──────┘    └──────────────────┘ │
+│                        │ WebSocket                       │
+└────────────────────────┼────────────────────────────────┘
+                         │
+┌────────────────────────┼────────────────────────────────┐
+│                  FastAPI Server (app.py)                  │
+│                        │                                 │
+│              ┌─────────▼─────────┐                       │
+│              │  ContextAwareEnv  │                       │
+│              │  (environment.py) │                       │
+│              │                   │                       │
+│              │  • Task presets   │                       │
+│              │  • Reward logic   │                       │
+│              │  • Fuzzy scoring  │                       │
+│              └───────────────────┘                       │
+│                                                          │
+│  Endpoints: GET /health, GET /, WS /ws                   │
+└──────────────────────────────────────────────────────────┘
+```
+
+The inference script manages the full lifecycle:
+
+1. **Server startup** — Launches FastAPI as a subprocess (or connects to a remote HF Space).
+2. **WebSocket episodes** — Each task runs as a WebSocket session, ensuring `reset()` and `step()` share the same environment instance.
+3. **LLM interaction** — Queries an OpenAI-compatible API with exponential-backoff retry logic.
+4. **Defensive parsing** — Six strategies (direct JSON → markdown stripping → regex extraction → nested-object unwrapping → keyword detection → safe fallback) guarantee a valid action from any LLM output.
+5. **Structured logging** — Every step emits parseable `[START]`, `[STEP]`, `[END]` lines for the automated evaluation pipeline.
 
 ---
 
@@ -54,7 +91,7 @@ not just a binary correct/incorrect check:
 
 ### Prerequisites
 
-- Python 3.10 or higher
+- Python 3.10+
 - pip or uv package manager
 
 ### Install dependencies
@@ -108,8 +145,7 @@ asyncio.run(main())
 
 ### 3. Run Inference (Automated Evaluation)
 
-The inference script starts its own server, runs all three task tiers against
-an LLM, and prints structured logs:
+The inference script starts its own server, runs all three task tiers against an LLM, and prints structured logs:
 
 ```bash
 # Set environment variables for the LLM API
@@ -121,13 +157,22 @@ export HF_TOKEN="your-huggingface-token"
 python inference.py
 ```
 
-#### Inference Features
+#### `--no-llm` mode
 
-- **Exponential-backoff retry** (3 attempts) on LLM API calls
-- **Defensive JSON parsing** — handles markdown fences, nested objects, keyword fallback
-- **Single asyncio event loop** for all tasks (no deprecation warnings)
+For testing without an LLM API key, the script supports hardcoded optimal actions:
+
+```bash
+python inference.py --no-llm
+```
+
+#### Inference Capabilities
+
+- **Exponential-backoff retry** — 3 attempts with 1s → 2s → 4s delays on transient errors (429, 503)
+- **Non-retryable error detection** — 401/403 auth errors skip retry and fail fast
+- **Defensive JSON parsing** — handles markdown fences, nested response objects, keyword fallback
+- **Single asyncio event loop** for all tasks (no deprecation warnings on Python 3.12+)
 - **Graceful Ctrl+C handling** with proper server cleanup
-- **Summary report** at the end with per-tier pass/fail status
+- **Summary report** at the end with per-tier pass/fail and aggregate score
 
 ---
 
@@ -150,13 +195,13 @@ Expected output:
   CONTEXT-AWARE-ENV  TEST SUITE
 ============================================================
 
-  ✓ PASS  easy_correct_action        (reward=1.0)
-  ✓ PASS  medium_correct_actions     (total_reward=1.00)
-  ✓ PASS  hard_correct_action        (reward=1.0)
-  ✓ PASS  easy_wrong_action          (reward=0.0)
+  ✓ PASS  easy_correct_action        (reward=0.89)
+  ✓ PASS  medium_correct_actions     (total_reward=0.95)
+  ✓ PASS  hard_correct_action        (reward=0.72)
+  ✓ PASS  easy_wrong_action          (reward=0.01)
   ✓ PASS  medium_interrupted         (interruption correctly penalised)
-  ✓ PASS  hard_generic_payload       (reward=0.5)
-  ✓ PASS  hard_wrong_action          (reward=0.0)
+  ✓ PASS  hard_generic_payload       (reward=0.50)
+  ✓ PASS  hard_wrong_action          (reward=0.01)
   ✓ PASS  health_endpoint
   ✓ PASS  root_endpoint
 
@@ -167,12 +212,40 @@ Expected output:
 
 ---
 
+## 📝 Log Format
+
+The `inference.py` script outputs structured lines for the automated evaluation parser:
+
+```
+[START] task=easy_1 env=local model=Qwen/Qwen2.5-72B-Instruct
+[STEP] step=1 action=summarize_screen(task=easy) reward=0.89 done=true error=null
+[END] success=true steps=1 score=0.891 rewards=0.89
+```
+
+After all tasks complete, a summary report is printed:
+
+```
+============================================================
+  INFERENCE SUMMARY
+============================================================
+  easy_1      PASS  score=0.891  steps=1  rewards=0.89
+  medium_1    PASS  score=0.950  steps=5  rewards=0.14,0.17,0.19,0.21,0.24
+  hard_1      PASS  score=0.715  steps=1  rewards=0.72
+------------------------------------------------------------
+  TOTAL    3/3 passed  aggregate_score=0.852
+============================================================
+```
+
+> **Note:** Medium score is the **sum** of per-turn rewards (not the average), since each turn earns a fraction designed to total ~0.95 over 5 correct turns. Easy and hard scores equal their single-step reward directly.
+
+---
+
 ## 🐳 Docker
 
 ### Build and Run
 
 ```bash
-docker build -t context-aware-env -f server/Dockerfile .
+docker build -t context-aware-env .
 docker run -p 8000:8000 context-aware-env
 ```
 
@@ -185,37 +258,23 @@ docker run -p 8000:8000 context-aware-env
 
 ---
 
-## 📋 OpenEnv Validation
+## 📋 OpenEnv Compliance
+
+This environment is fully compliant with the OpenEnv specification:
 
 ```bash
 openenv validate
 ```
 
----
+**Compliance checklist:**
 
-## 📝 Log Format
-
-The `inference.py` script outputs structured lines for the automated evaluation parser:
-
-```
-[START] task=easy_1 env=local model=Qwen/Qwen2.5-72B-Instruct
-[STEP] step=1 action=summarize_screen(task=easy) reward=0.85 done=true error=null
-[END] success=true steps=1 score=0.847 rewards=0.85
-```
-
-After all tasks, a summary report is printed:
-
-```
-============================================================
-  INFERENCE SUMMARY
-============================================================
-  easy_1      PASS  score=0.847  steps=1  rewards=0.85
-  medium_1    PASS  score=0.190  steps=5  rewards=0.14,0.17,0.19,0.21,0.24
-  hard_1      PASS  score=0.706  steps=1  rewards=0.71
-------------------------------------------------------------
-  TOTAL    3/3 passed  aggregate_score=0.581
-============================================================
-```
+- [x] `openenv.yaml` manifest with correct env name and entry points
+- [x] `reset(task_name)` / `step(action)` API via WebSocket
+- [x] All scores strictly in the open interval (0, 1) — never 0.0 or 1.0
+- [x] Structured `[START]`, `[STEP]`, `[END]` log lines in `inference.py`
+- [x] Health endpoint at `GET /health`
+- [x] Docker deployment with `HEALTHCHECK`
+- [x] No hardcoded secrets in source code
 
 ---
 
@@ -223,23 +282,23 @@ After all tasks, a summary report is printed:
 
 ```
 context_aware_env/
-├── .gitignore             # Git exclusions (pycache, env, lock)
-├── .dockerignore          # Docker build exclusions
 ├── __init__.py            # Package re-exports & metadata
 ├── models.py              # Pydantic data contracts (Action, Observation, State)
 ├── client.py              # Typed async WebSocket client
-├── inference.py           # LLM evaluation script (with retry & defensive parsing)
+├── inference.py           # LLM evaluation script (retry, defensive parsing, logging)
 ├── test_endpoints.py      # Comprehensive test suite (9 tests)
 ├── openenv.yaml           # OpenEnv manifest
 ├── pyproject.toml         # Python project configuration
 ├── requirements.txt       # Pinned dependencies
+├── Dockerfile             # Multi-stage container (non-root, HEALTHCHECK)
+├── .gitignore             # Git exclusions
+├── .dockerignore          # Docker build exclusions
 ├── README.md              # This file
 ├── project_documentation.md  # Detailed technical documentation
 └── server/
     ├── __init__.py        # Server sub-package
-    ├── environment.py     # Core RL environment logic (task presets, rewards)
-    ├── app.py             # FastAPI server (health, CORS, WebSocket)
-    └── Dockerfile         # Multi-stage container (non-root, HEALTHCHECK)
+    ├── environment.py     # Core RL environment (task presets, reward logic)
+    └── app.py             # FastAPI server (health, CORS, WebSocket)
 ```
 
 ---
@@ -250,29 +309,47 @@ context_aware_env/
 |-----------------------|------------------------------------------|----------------------------------------------|
 | `API_BASE_URL`        | `https://router.huggingface.co/v1`       | OpenAI-compatible API endpoint               |
 | `MODEL_NAME`          | `Qwen/Qwen2.5-72B-Instruct`             | Model identifier for chat completions        |
-| `HF_TOKEN`            | *(empty)*                                | HuggingFace API token (**never hardcode!**)  |
+| `HF_TOKEN`            | *(empty)*                                | HuggingFace API token                        |
+| `ENV_SERVER_URL`      | *(remote HF Space)*                      | Use a deployed environment instead of local  |
 | `SERVER_WAIT_TIMEOUT` | `30`                                     | Seconds to wait for server health check      |
 
-> ⚠️ **Security Warning:** NEVER put your `HF_TOKEN` directly in source code.
-> Always set it as an environment variable. If you accidentally committed a token,
-> **revoke it immediately** at https://huggingface.co/settings/tokens.
+> ⚠️ **Security:** Never hardcode `HF_TOKEN` in source code. Always set it as an environment variable. If you accidentally committed a token, **revoke it immediately** at https://huggingface.co/settings/tokens.
 
 ---
 
-## 🛡️ Robustness Features
+## 🛡️ Robustness & Safety
 
-- **`extra="forbid"`** on all Pydantic models — catches typos in field names immediately
-- **`model_validator`** on `ContextAction` — auto-clears payload when `action_type="stay_silent"`
-- **`MAX_STEPS_PER_EPISODE = 20`** — prevents runaway agents from looping forever
-- **Episode-done guard** — returns zero-reward observation if `step()` is called after done
-- **Task name validation** — raises `ValueError` on invalid task names instead of silently defaulting
-- **Non-retryable error detection** — 401/403 auth errors skip retry (fail fast)
-- **6-strategy defensive parsing** — guarantees valid action from any LLM output
-- **Startup token warning** — clear instructions when `HF_TOKEN` is missing
+| Feature                        | Description                                                              |
+|--------------------------------|--------------------------------------------------------------------------|
+| **Strict Pydantic models**     | `extra="forbid"` catches typos in field names immediately                |
+| **Auto-sanitised payloads**    | `model_validator` clears payload when `action_type="stay_silent"`        |
+| **Step ceiling**               | `MAX_STEPS_PER_EPISODE = 20` prevents runaway agents                    |
+| **Episode-done guard**         | Returns zero-reward if `step()` is called after episode ends             |
+| **Task validation**            | `ValueError` on invalid task names (no silent fall-through)              |
+| **Non-retryable detection**    | 401/403 errors skip retry loop (fail fast, save time)                    |
+| **6-strategy defensive parse** | Guarantees a valid action from any LLM output, including garbage         |
+| **Token warning**              | Clear setup instructions printed when `HF_TOKEN` is missing              |
+| **Score clamping**             | All rewards clamped to (0, 1) to satisfy evaluation platform constraints |
 
 ---
 
 ## 🚢 Deployment
+
+### HuggingFace Spaces (recommended)
+
+```bash
+pip install -U "huggingface_hub[cli]"
+hf auth login
+hf upload YOUR_HF_USERNAME/context-aware-env . . --repo-type space
+```
+
+### Docker Hub
+
+```bash
+docker build -t context-aware-env .
+docker tag context-aware-env YOUR_DOCKERHUB/context-aware-env:latest
+docker push YOUR_DOCKERHUB/context-aware-env:latest
+```
 
 ### GitHub
 
@@ -283,27 +360,10 @@ git remote add origin https://github.com/YOUR_USERNAME/context-aware-env.git
 git push -u origin main
 ```
 
-### Docker Hub
-
-```bash
-docker build -t context-aware-env -f server/Dockerfile .
-docker tag context-aware-env YOUR_DOCKERHUB/context-aware-env:latest
-docker push YOUR_DOCKERHUB/context-aware-env:latest
-```
-
-### HuggingFace Spaces
-
-```bash
-pip install -U "huggingface_hub[cli]"
-hf auth login
-hf upload YOUR_HF_USERNAME/context-aware-env . . --repo-type space
-```
-
-📖 See [`project_documentation.md`](project_documentation.md) for detailed deployment guides.
+📖 See [`project_documentation.md`](project_documentation.md) for detailed deployment guides and code walkthroughs.
 
 ---
 
 ## License
 
 MIT
-

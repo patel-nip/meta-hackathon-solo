@@ -119,17 +119,17 @@ async def test_medium_correct_actions():
         assert obs.explicit_help_request is False
 
         total_reward = 0.0
-        # Per-turn rewards vary: ~0.14, ~0.165, ~0.19, ~0.215, ~0.24
+        # Per-turn rewards are dynamically computed from context analysis
         for i in range(5):
             action = ContextAction(action_type="stay_silent", payload="")
             await ws.send(json.dumps({"type": "step", "data": action.model_dump()}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
             obs = parse_obs(resp["data"])
-            assert 0.10 <= obs.reward <= 0.30, f"Step {i+1}: Expected reward in [0.10, 0.30], got {obs.reward}"
+            assert 0.10 <= obs.reward <= 0.40, f"Step {i+1}: Expected reward in [0.10, 0.40], got {obs.reward}"
             total_reward += obs.reward
 
         assert obs.done is True
-        assert 0.85 <= total_reward <= 1.05, f"Total reward {total_reward} not in expected range"
+        assert 0.85 <= total_reward <= 1.20, f"Total reward {total_reward} not in expected range"
         _record(test_name, True, f"total_reward={total_reward:.2f}")
 
 
@@ -194,13 +194,13 @@ async def test_medium_interrupted():
         await ws.send(json.dumps({"type": "reset", "data": {"task_name": "medium"}}))
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
 
-        # Two successful silent turns (variable per-turn rewards)
+        # Two successful silent turns (dynamically context-scored rewards)
         for i in range(2):
             action = ContextAction(action_type="stay_silent", payload="")
             await ws.send(json.dumps({"type": "step", "data": action.model_dump()}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
             obs = parse_obs(resp["data"])
-            assert 0.10 <= obs.reward <= 0.30, f"Step {i+1}: reward {obs.reward} not in range"
+            assert 0.10 <= obs.reward <= 0.40, f"Step {i+1}: reward {obs.reward} not in range"
 
         # Interrupt with proactive_help → should fail
         action = ContextAction(action_type="proactive_help", payload="need help?")

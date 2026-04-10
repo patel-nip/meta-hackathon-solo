@@ -110,7 +110,7 @@ def _clamp_score(raw: float) -> float:
 # ENV_SERVER_URL: set this to your deployed HF Space URL to run against the
 # remote environment instead of starting a local server.
 #   e.g.  ENV_SERVER_URL=https://patel-nip-meta-hackathon.hf.space
-_env_server_url: str = os.environ.get("ENV_SERVER_URL", "https://patel-nip-meta-hackathon.hf.space").rstrip("/")
+_env_server_url: str = (os.environ.get("ENV_SERVER_URL") or "https://patel-nip-meta-hackathon.hf.space").rstrip("/")
 USE_REMOTE_SERVER: bool = bool(_env_server_url)
 
 if USE_REMOTE_SERVER:
@@ -691,14 +691,20 @@ def log_end(
 def _compute_score(rewards: list[float]) -> float:
     """Compute the aggregate score from per-step rewards.
 
-    Uses the mean of clamped rewards, then clamps the result
-    to stay strictly within (0, 1).
+    Uses the **sum** of clamped rewards (not the mean).  This is
+    critical for multi-step tasks like *medium*, where 5 small
+    per-turn rewards (~0.14 … ~0.24) are designed to add up to
+    approximately 1.0.  Averaging them would yield ~0.19, making
+    it impossible for the aggregate score to approach 1.0.
+
+    For single-step tasks (easy, hard) the sum equals the single
+    reward, so the behaviour is unchanged.
     """
     if not rewards:
         return SCORE_EPSILON
     clamped = [_clamp_score(r) for r in rewards]
-    avg = sum(clamped) / len(clamped)
-    return _clamp_score(avg)
+    total = sum(clamped)
+    return _clamp_score(total)
 
 
 async def _run_all_tasks(*, use_llm: bool = True) -> dict[str, dict]:

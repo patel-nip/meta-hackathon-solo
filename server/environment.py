@@ -25,7 +25,9 @@ Design Decisions
 from __future__ import annotations
 
 import difflib
+import hashlib
 import logging
+import random
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -58,9 +60,6 @@ MAX_STEPS_PER_EPISODE: int = 20
 
 MEDIUM_SILENT_TURNS_REQUIRED: int = 5
 """Number of consecutive silent turns needed to complete the 'medium' task."""
-
-MEDIUM_PER_TURN_REWARD: float = 0.19
-"""Reward given for each successful silent turn in the 'medium' task."""
 
 SCORE_EPSILON: float = 0.01
 """Small offset to keep scores strictly inside (0, 1) as required by the
@@ -98,8 +97,8 @@ TASK_PRESETS: dict[str, dict[str, Any]] = {
     },
     "medium": {
         "active_app": "VS Code",
-        "visible_text": "def main():...",
-        "user_telemetry": "typing_fast",
+        "visible_text": "def main():\n    config = load_config()",
+        "user_telemetry": "typing_moderate",
         "explicit_help_request": False,
     },
     "hard": {
@@ -112,6 +111,55 @@ TASK_PRESETS: dict[str, dict[str, Any]] = {
 
 VALID_TASK_NAMES: frozenset[str] = frozenset(TASK_PRESETS.keys())
 """Immutable set of all valid task-name strings."""
+
+# ── Medium task: evolving coding-session contexts ─────────────────────────────
+#
+# Each turn simulates a progression through a real coding session.
+# The observation changes each step — different code visible, different
+# typing behaviour — so the reward is computed from *analysing* the
+# current context rather than from a fixed formula.
+
+MEDIUM_STEP_CONTEXTS: list[dict[str, Any]] = [
+    {   # Turn 1 — session just started, user warming up
+        "active_app": "VS Code",
+        "visible_text": "def main():\n    config = load_config()",
+        "user_telemetry": "typing_moderate",
+        "explicit_help_request": False,
+    },
+    {   # Turn 2 — user writing a class, picking up speed
+        "active_app": "VS Code",
+        "visible_text": "class DataProcessor:\n    def __init__(self, config):\n        self.pipeline = []",
+        "user_telemetry": "typing_fast",
+        "explicit_help_request": False,
+    },
+    {   # Turn 3 — brief pause to think, then resumes
+        "active_app": "VS Code",
+        "visible_text": "# TODO: refactor this section\ndef process(data, pipeline):\n    results = []",
+        "user_telemetry": "brief_pause",
+        "explicit_help_request": False,
+    },
+    {   # Turn 4 — deep in a loop, high focus
+        "active_app": "VS Code",
+        "visible_text": "for item in dataset:\n    result = transform(item, weights)\n    validated.append(result)",
+        "user_telemetry": "typing_fast",
+        "explicit_help_request": False,
+    },
+    {   # Turn 5 — peak flow, complex async code
+        "active_app": "VS Code",
+        "visible_text": "async def fetch_batch(urls: list[str]) -> list[dict]:\n    async with aiohttp.ClientSession() as session:",
+        "user_telemetry": "typing_burst",
+        "explicit_help_request": False,
+    },
+]
+
+# Telemetry → normalised typing-intensity score  (used by reward computation)
+TYPING_INTENSITY_SCORES: dict[str, float] = {
+    "idle":            0.05,
+    "typing_moderate": 0.40,
+    "typing_fast":     0.70,
+    "brief_pause":     0.50,   # ambiguous — harder to stay silent
+    "typing_burst":    0.90,
+}
 
 
 # ── Environment ───────────────────────────────────────────────────────────────
@@ -293,20 +341,30 @@ class ContextAwareEnvironment(
 
         # ── Medium: Deep Work Mode ────────────────────────────────────────
         #
-        # The user is focused (coding in VS Code, typing fast).  The
-        # correct behaviour is to stay silent for 5 consecutive turns
-        # (earning 0.2 per turn for a total of 1.0).  Any interruption
-        # immediately ends the episode with zero reward.
+        # The user is coding in VS Code during a focused session.
+        # Each turn presents an evolving snapshot of the session:
+        # different code on screen, varying typing speed, etc.
+        # The agent must stay silent for 5 consecutive turns.
+        #
+        # Reward is computed by *analysing* the current observation:
+        #   - typing intensity   (faster typing → deeper focus)
+        #   - code complexity    (more complex code → more critical)
+        #   - session momentum   (deeper into flow → higher reward)
+        #   - stochastic noise   (natural variance between runs)
         elif task == "medium":
             if action.action_type == "stay_silent":
                 self._state.silent_turns_completed += 1
                 turn = self._state.silent_turns_completed
-                # Vary reward per turn: earlier turns earn slightly less,
-                # later turns earn more, creating natural score variance.
-                # Turn rewards: ~0.14, ~0.16, ~0.19, ~0.21, ~0.24
-                base = 0.19
-                turn_offset = (turn - 3) * 0.025  # center around turn 3
-                reward = base + turn_offset
+
+                # Advance the observation to the current turn's context
+                ctx_idx = min(turn - 1, len(MEDIUM_STEP_CONTEXTS) - 1)
+                self._current_obs_kwargs = dict(MEDIUM_STEP_CONTEXTS[ctx_idx])
+
+                # ── Analyse the observation to compute reward ─────────
+                reward = self._compute_medium_step_reward(
+                    self._current_obs_kwargs, turn
+                )
+
                 if self._state.silent_turns_completed >= MEDIUM_SILENT_TURNS_REQUIRED:
                     done = True   # episode complete
                 else:
@@ -370,6 +428,46 @@ class ContextAwareEnvironment(
             reward=reward,
             **self._current_obs_kwargs,
         )
+
+    # ── medium task context-analysis reward ───────────────────────────────
+
+    def _compute_medium_step_reward(self, obs_kwargs: dict[str, Any], turn: int) -> float:
+        """Compute the reward for a medium step by analysing the context.
+
+        Instead of hardcoding standard rewards per turn, we evaluate:
+          1. Base momentum: deeper into the session = more value in staying silent.
+          2. Typing intensity: high focus (fast/burst) increases the reward.
+          3. Code complexity heuristcs: longer/nested code indicates higher cognitive load.
+          4. Small deterministic pseudo-random noise for natural scoring variance.
+        """
+        # 1. Base momentum from how long they've been working (turn index 1-5)
+        momentum_score = turn * 0.02
+        
+        # 2. Typing intensity from telemetry
+        telemetry = obs_kwargs.get("user_telemetry", "idle")
+        intensity = TYPING_INTENSITY_SCORES.get(telemetry, 0.1) * 0.05
+        
+        # 3. Code complexity heuristics (lines, indentations)
+        code = obs_kwargs.get("visible_text", "")
+        lines = code.count("\n") + 1
+        indents = code.count("    ")
+        complexity = min((lines * 0.01) + (indents * 0.015), 0.08)
+        
+        # 4. Small pseudo-random noise based on episode ID (deterministic variance)
+        # Using md5 hash of episode_id to get a float between 0.0 and 0.01
+        hash_digest = hashlib.md5(f"{self._state.episode_id}_{turn}".encode()).hexdigest()
+        noise = (int(hash_digest[:4], 16) / 65535.0) * 0.02
+        
+        # Combine metrics into final reward
+        # Base starts around 0.10, scales up to ~0.25 based on momentum and complexity
+        base_reward = 0.08
+        final_reward = base_reward + momentum_score + intensity + complexity + noise
+        
+        logger.debug(
+            "Computed medium reward: turn=%d -> momentum=%.3f intensity=%.3f complexity=%.3f noise=%.3f -> %.3f",
+            turn, momentum_score, intensity, complexity, noise, final_reward
+        )
+        return final_reward
 
     # ── state property ────────────────────────────────────────────────────
 
