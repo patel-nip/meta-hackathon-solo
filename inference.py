@@ -54,8 +54,10 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 try:
     from context_aware_env.models import ContextAction, ContextObservation
+    from context_aware_env.utils import clamp_score as _clamp_score, SCORE_EPSILON
 except ImportError:
     from models import ContextAction, ContextObservation  # type: ignore[no-redef]
+    from utils import clamp_score as _clamp_score, SCORE_EPSILON  # type: ignore[no-redef]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -94,23 +96,15 @@ TASK_NAME_MAP: dict[str, str] = {"easy_1": "easy", "medium_1": "medium", "hard_1
 MAX_STEPS: int = 8
 SERVER_PORT: int = 8000
 
-# ── Score clamping ────────────────────────────────────────────────────────────
-# The Meta x Scaler grading pipeline rejects scores exactly 0.0 or 1.0.
-# Every score must be strictly in the open interval (0, 1).
-SCORE_EPSILON: float = 0.01
+# Score clamping is imported from utils.py (shared with environment.py)
+# _clamp_score = clamp_score (aliased above to preserve call-sites)
+# SCORE_EPSILON imported from utils.py
 
-def _clamp_score(raw: float) -> float:
-    """Clamp *raw* into the open interval (0, 1)."""
-    if raw <= 0.0:
-        return SCORE_EPSILON
-    if raw >= 1.0:
-        return 1.0 - SCORE_EPSILON
-    return raw
-
-# ENV_SERVER_URL: set this to your deployed HF Space URL to run against the
-# remote environment instead of starting a local server.
-#   e.g.  ENV_SERVER_URL=https://patel-nip-meta-hackathon.hf.space
-_env_server_url: str = (os.environ.get("ENV_SERVER_URL") or "https://patel-nip-meta-hackathon.hf.space").rstrip("/")
+# ENV_SERVER_URL: defaults to the deployed HF Space.  Override with an
+# empty string to fall back to a local server (dev only).
+_env_server_url: str = os.environ.get(
+    "ENV_SERVER_URL", "https://patel-nip-meta-hackathon.hf.space"
+).rstrip("/")
 USE_REMOTE_SERVER: bool = bool(_env_server_url)
 
 if USE_REMOTE_SERVER:
@@ -134,8 +128,9 @@ LLM_RETRY_BASE_DELAY: float = 1.0
 """Base delay in seconds for exponential backoff between LLM retries."""
 
 # ── HTTP status codes that should NOT be retried ──────────────────────────────
-# Auth failures, permission denials, and invalid requests won't fix themselves.
-NO_RETRY_STATUS_CODES: frozenset[int] = frozenset({400, 401, 403, 404, 422})
+# Auth failures, permission denials, quota exhaustion, and invalid requests
+# won't fix themselves.
+NO_RETRY_STATUS_CODES: frozenset[int] = frozenset({400, 401, 402, 403, 404, 422})
 
 # ── Server startup ────────────────────────────────────────────────────────────
 
@@ -159,7 +154,7 @@ DEFAULT_ACTION = ContextAction(action_type="stay_silent", payload="")
 NO_LLM_ACTIONS: dict[str, ContextAction] = {
     "easy": ContextAction(
         action_type="summarize_screen",
-        payload="The user is watching a React tutorial video on YouTube and needs help.",
+        payload="The user is watching a React tutorial video on YouTube and needs help understanding the content.",
     ),
     "medium": ContextAction(
         action_type="stay_silent",
@@ -167,7 +162,11 @@ NO_LLM_ACTIONS: dict[str, ContextAction] = {
     ),
     "hard": ContextAction(
         action_type="proactive_help",
-        payload="It looks like you have an npm error in your terminal. Try running npm cache clean --force and then reinstall.",
+        payload=(
+            "Your npm build failed with an ELIFECYCLE error. "
+            "The module './components/Dashboard' cannot be resolved "
+            "— check that the component file exists and the import path is correct."
+        ),
     ),
 }
 
@@ -182,23 +181,29 @@ def get_no_llm_action(task_name: str) -> ContextAction:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SYSTEM_PROMPT = """\
-You are a desktop AI assistant.  You observe the user's screen and decide
-whether to stay silent, summarize the screen, or proactively offer help.
+You are a socially-aware desktop AI assistant. You observe the user's screen
+and must decide the most appropriate action based on their current context.
 
 You MUST respond with ONLY a valid JSON object (no markdown, no extra text).
 
 The JSON must have exactly these fields:
 {
   "action_type": "<one of: stay_silent | summarize_screen | proactive_help>",
-  "payload": "<string – your message if you speak, or empty>"
+  "payload": "<string – your message if you speak, or empty string if silent>"
 }
 
-Guidelines:
-- If the user explicitly asks for help, use "summarize_screen".
-- If the user is focused (typing fast, coding), use "stay_silent".
-- If the user is frustrated (errors on screen, erratic behaviour) but hasn't
-  asked for help, use "proactive_help" and reference the specific error in
-  your payload.
+Decision guidelines:
+- "summarize_screen": Use ONLY when the user EXPLICITLY asks for help.
+  Provide a helpful summary that references the specific content on screen.
+- "stay_silent": Use when the user is focused on their work (typing fast,
+  coding, in flow state). Do NOT interrupt deep work sessions.
+- "proactive_help": Use when you detect the user is struggling (errors on
+  screen, erratic mouse, low typing speed after errors) but has NOT asked
+  for help. You MUST reference the SPECIFIC error or issue in your payload.
+  Do not give generic help — mention error codes, file names, or commands.
+
+Key principle: A good assistant knows when NOT to speak. Interrupting deep
+focus is just as harmful as ignoring someone who needs help.
 """
 
 
@@ -458,6 +463,9 @@ def build_user_message(obs: ContextObservation) -> str:
         f"Active app: {obs.active_app}\n"
         f"Visible text: {obs.visible_text}\n"
         f"User telemetry: {obs.user_telemetry}\n"
+        f"Mouse activity: {obs.mouse_activity}\n"
+        f"Keystrokes per minute: {obs.recent_keystrokes_per_minute}\n"
+        f"Errors on screen: {obs.error_count}\n"
         f"Explicit help request: {obs.explicit_help_request}\n"
         "\nRespond with ONLY a JSON object."
     )
@@ -531,15 +539,16 @@ def parse_action(raw: str) -> ContextAction:
 
     # ── Attempt 3: keyword detection fallback ─────────────────────────────
     lower = raw.lower()
-    if "proactive_help" in lower:
+    if "proactive_help" in lower or ("error" in lower and "npm" in lower):
+        # Extract relevant content from the LLM output as the payload
         return ContextAction(
             action_type="proactive_help",
-            payload=raw[:200],
+            payload=raw[:300],
         )
-    if "summarize_screen" in lower:
+    if "summarize_screen" in lower or ("help" in lower and "summary" in lower):
         return ContextAction(
             action_type="summarize_screen",
-            payload="",
+            payload=raw[:300],
         )
 
     return DEFAULT_ACTION

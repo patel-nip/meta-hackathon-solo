@@ -28,7 +28,7 @@ Modern AI assistants must be more than just capable — they must be **socially 
 |------------|------------------------------------------------------------------------------------|--------------------------------------------------|
 | **Easy**   | User watches a YouTube tutorial and *explicitly asks for help*                     | `summarize_screen` — respond to the direct request |
 | **Medium** | User is coding in VS Code with focused typing (*deep work mode*)                  | `stay_silent` × 5 consecutive turns               |
-| **Hard**   | Terminal shows `npm ERR!` while user has erratic mouse movement (*silent frustration*) | `proactive_help` — mention the specific error      |
+| **Hard**   | Terminal shows `npm ERR! ELIFECYCLE` + missing module while user has erratic mouse (*silent frustration*) | `proactive_help` — mention the specific error and root cause |
 
 ### Scoring Rubric
 
@@ -36,16 +36,16 @@ All rewards are **continuous values in the open interval (0, 1)** — never exac
 
 | Action                              | Easy           | Medium (per turn) | Hard               |
 |-------------------------------------|----------------|--------------------|--------------------| 
-| `summarize_screen`                  | 0.4–0.99       | 0.0 (instant fail) | 0.0                |
-| `stay_silent`                       | 0.0            | 0.14–0.24          | 0.0                |
-| `proactive_help` + specific error   | 0.0            | 0.0 (instant fail) | 0.6–0.99           |
-| `proactive_help` + generic payload  | 0.0            | 0.0 (instant fail) | 0.4–0.6 (partial)  |
+| `summarize_screen`                  | 0.40–0.99      | 0.0 (instant fail) | 0.0                |
+| `stay_silent`                       | 0.0            | 0.17–0.29          | 0.0                |
+| `proactive_help` + specific error   | 0.0            | 0.0 (instant fail) | 0.65–0.95          |
+| `proactive_help` + generic payload  | 0.0            | 0.0 (instant fail) | 0.35–0.50 (partial)|
 
 **How scoring works per tier:**
 
-- **Easy** — Single-step. Reward is `base (0.4) + fuzzy similarity to screen context (up to 0.4) + length quality bonus (0.2)`. Summarising with relevant content scores high; wrong action scores 0.
-- **Medium** — Multi-step (5 turns). Each silent turn earns a small reward that increases with each turn (~0.14, 0.17, 0.19, 0.21, 0.24). The **task score is the sum** of all per-turn rewards, designed to reach ~0.95 for 5 correct turns. Any interruption immediately ends the episode with zero reward.
-- **Hard** — Single-step. Reward is `base (0.4) + fuzzy match to error description (up to 0.4) + keyword bonuses (up to 0.2 for mentioning "npm" and "error")`. Proactive help that references the specific error scores highest.
+- **Easy** — Single-step. Reward is `base(0.40) + fuzzy similarity(up to 0.30) + keyword relevance(up to 0.15) + length quality(0.15)`. Summarising with relevant content and mentioning key terms (react, tutorial, youtube) scores highest.
+- **Medium** — Multi-step (5 turns). Each silent turn earns a context-analysed reward based on typing intensity, code complexity, and session momentum (~0.17–0.29 per turn). The **task score is the sum** of all per-turn rewards, designed to reach ~0.95–1.15 for 5 correct turns. Any interruption immediately ends the episode with zero reward.
+- **Hard** — Single-step. Multi-signal scoring: `base(0.35) + fuzzy match(up to 0.25) + critical keywords(up to 0.20 for npm, error, ELIFECYCLE, build) + specificity bonus(up to 0.15 for mentioning Dashboard, module, resolve)`. The agent must parse noisy terminal output and identify the specific error to score well.
 
 ---
 
@@ -184,7 +184,7 @@ Start the server, then run the comprehensive test suite:
 # Terminal 1: Start server
 python -m uvicorn server.app:app --host 0.0.0.0 --port 8000
 
-# Terminal 2: Run tests (9 tests: 3 positive + 4 negative + 2 endpoint)
+# Terminal 2: Run tests (11 tests: 3 positive + 4 negative + 2 state + 2 endpoint)
 python test_endpoints.py
 ```
 
@@ -195,18 +195,20 @@ Expected output:
   CONTEXT-AWARE-ENV  TEST SUITE
 ============================================================
 
-  ✓ PASS  easy_correct_action        (reward=0.89)
-  ✓ PASS  medium_correct_actions     (total_reward=0.95)
-  ✓ PASS  hard_correct_action        (reward=0.72)
+  ✓ PASS  easy_correct_action        (reward=0.895)
+  ✓ PASS  medium_correct_actions     (total_reward=1.12)
+  ✓ PASS  hard_correct_action        (reward=0.815)
   ✓ PASS  easy_wrong_action          (reward=0.01)
   ✓ PASS  medium_interrupted         (interruption correctly penalised)
-  ✓ PASS  hard_generic_payload       (reward=0.50)
+  ✓ PASS  hard_generic_payload       (reward=0.370)
   ✓ PASS  hard_wrong_action          (reward=0.01)
+  ✓ PASS  reset_clean_state          (state fully cleared between episodes)
+  ✓ PASS  step_after_done            (zero reward returned after episode end)
   ✓ PASS  health_endpoint
   ✓ PASS  root_endpoint
 
 ------------------------------------------------------------
-  9/9 tests passed — ALL PASSED
+  11/11 tests passed — ALL PASSED
 ------------------------------------------------------------
 ```
 
@@ -284,9 +286,10 @@ openenv validate
 context_aware_env/
 ├── __init__.py            # Package re-exports & metadata
 ├── models.py              # Pydantic data contracts (Action, Observation, State)
+├── utils.py               # Shared utilities (score clamping, fuzzy matching, keyword scoring)
 ├── client.py              # Typed async WebSocket client
 ├── inference.py           # LLM evaluation script (retry, defensive parsing, logging)
-├── test_endpoints.py      # Comprehensive test suite (9 tests)
+├── test_endpoints.py      # Comprehensive test suite (11 tests)
 ├── openenv.yaml           # OpenEnv manifest
 ├── pyproject.toml         # Python project configuration
 ├── requirements.txt       # Pinned dependencies
@@ -294,6 +297,7 @@ context_aware_env/
 ├── .gitignore             # Git exclusions
 ├── .dockerignore          # Docker build exclusions
 ├── README.md              # This file
+├── Evaluation_Criteria.md # Hackathon evaluation rubric
 ├── project_documentation.md  # Detailed technical documentation
 └── server/
     ├── __init__.py        # Server sub-package
@@ -330,6 +334,9 @@ context_aware_env/
 | **6-strategy defensive parse** | Guarantees a valid action from any LLM output, including garbage         |
 | **Token warning**              | Clear setup instructions printed when `HF_TOKEN` is missing              |
 | **Score clamping**             | All rewards clamped to (0, 1) to satisfy evaluation platform constraints |
+| **Shared utilities**           | `utils.py` centralises scoring logic — no DRY violations                 |
+| **Multi-signal hard scoring**  | Weighted keywords + fuzzy match + specificity — genuinely challenges LLMs |
+| **Rich observation space**     | 7 fields (app, text, telemetry, help, mouse, keystrokes, errors)         |
 
 ---
 

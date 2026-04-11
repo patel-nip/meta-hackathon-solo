@@ -5,8 +5,9 @@ Smoke + Negative tests: WebSocket-based episode runs for all three tasks.
 These tests verify:
   ✓ Correct behaviour for each task tier (easy, medium, hard)
   ✓ Wrong actions yield zero reward
-  ✓ Invalid task names are rejected
   ✓ Edge cases (stepping after done, partial medium completion)
+  ✓ Reset produces clean state
+  ✓ HTTP endpoints respond correctly
 
 Usage
 -----
@@ -70,7 +71,7 @@ _results: list[tuple[str, bool, str]] = []
 def _record(name: str, passed: bool, detail: str = "") -> None:
     _results.append((name, passed, detail))
     status = "  PASS" if passed else "* FAIL"
-    msg = f"  {status}  {name}"
+    msg = f"{status}  {name}"
     if detail:
         msg += f"  ({detail})"
     print(msg)
@@ -82,7 +83,7 @@ def _record(name: str, passed: bool, detail: str = "") -> None:
 
 
 async def test_easy_correct_action():
-    """Easy task: summarize_screen → reward in (0.4, 0.99], done=True."""
+    """Easy task: summarize_screen → reward in [0.40, 0.99], done=True."""
     import websockets
 
     test_name = "easy_correct_action"
@@ -93,17 +94,24 @@ async def test_easy_correct_action():
         assert resp["type"] == "observation", f"Expected observation, got {resp['type']}"
         obs = parse_obs(resp["data"])
         assert obs.explicit_help_request is True, "Easy task should have help request"
+        # Verify new observation fields
+        assert obs.mouse_activity == "stationary", f"Expected stationary, got {obs.mouse_activity}"
+        assert obs.recent_keystrokes_per_minute == 0
+        assert obs.error_count == 0
 
-        # STEP — correct action
-        action = ContextAction(action_type="summarize_screen", payload="Here is a summary")
+        # STEP — correct action with relevant keywords
+        action = ContextAction(
+            action_type="summarize_screen",
+            payload="The user is watching a React tutorial video on YouTube",
+        )
         await ws.send(json.dumps({"type": "step", "data": action.model_dump()}))
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
         obs = parse_obs(resp["data"])
 
-        # Continuous scoring: base(0.4) + similarity*0.4 + length_bonus(0.2)
-        assert 0.4 <= obs.reward <= 0.99, f"Expected reward in [0.4, 0.99], got {obs.reward}"
+        # Continuous scoring: base(0.40) + similarity*0.30 + keywords(up to 0.15) + length(0.15)
+        assert 0.40 <= obs.reward <= 0.99, f"Expected reward in [0.40, 0.99], got {obs.reward}"
         assert obs.done is True
-        _record(test_name, True, f"reward={obs.reward}")
+        _record(test_name, True, f"reward={obs.reward:.3f}")
 
 
 async def test_medium_correct_actions():
@@ -117,6 +125,10 @@ async def test_medium_correct_actions():
         assert resp["type"] == "observation"
         obs = parse_obs(resp["data"])
         assert obs.explicit_help_request is False
+        # Verify new observation fields for medium
+        assert obs.mouse_activity == "minimal"
+        assert obs.recent_keystrokes_per_minute == 45
+        assert obs.error_count == 0
 
         total_reward = 0.0
         # Per-turn rewards are dynamically computed from context analysis
@@ -129,12 +141,12 @@ async def test_medium_correct_actions():
             total_reward += obs.reward
 
         assert obs.done is True
-        assert 0.85 <= total_reward <= 1.20, f"Total reward {total_reward} not in expected range"
+        assert 0.85 <= total_reward <= 1.25, f"Total reward {total_reward} not in expected range [0.85, 1.25]"
         _record(test_name, True, f"total_reward={total_reward:.2f}")
 
 
 async def test_hard_correct_action():
-    """Hard task: proactive_help with 'npm error' → high reward."""
+    """Hard task: proactive_help with specific error details → high reward."""
     import websockets
 
     test_name = "hard_correct_action"
@@ -144,19 +156,28 @@ async def test_hard_correct_action():
         assert resp["type"] == "observation"
         obs = parse_obs(resp["data"])
         assert obs.user_telemetry == "erratic_mouse"
+        # Verify new observation fields for hard
+        assert obs.mouse_activity == "erratic_clicking"
+        assert obs.recent_keystrokes_per_minute == 5
+        assert obs.error_count == 3
 
+        # Action that references the specific error details
         action = ContextAction(
             action_type="proactive_help",
-            payload="It looks like you have an npm error — try deleting node_modules",
+            payload=(
+                "Your npm build failed with an ELIFECYCLE error. "
+                "The module './components/Dashboard' cannot be resolved "
+                "— check that the component file exists and the import path is correct."
+            ),
         )
         await ws.send(json.dumps({"type": "step", "data": action.model_dump()}))
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
         obs = parse_obs(resp["data"])
 
-        # Continuous scoring: base(0.4) + similarity*0.4 + npm_bonus(0.1) + error_bonus(0.1)
-        assert 0.6 <= obs.reward <= 0.99, f"Expected reward in [0.6, 0.99], got {obs.reward}"
+        # Multi-signal scoring: base(0.35) + sim*0.25 + critical_kwd(up to 0.20) + specificity(up to 0.15)
+        assert 0.65 <= obs.reward <= 0.99, f"Expected reward in [0.65, 0.99], got {obs.reward}"
         assert obs.done is True
-        _record(test_name, True, f"reward={obs.reward}")
+        _record(test_name, True, f"reward={obs.reward:.3f}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -231,10 +252,10 @@ async def test_hard_generic_payload():
         resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
         obs = parse_obs(resp["data"])
 
-        # Generic payload: base(0.4) + similarity + no keyword bonuses → ~0.40-0.60
-        assert 0.40 <= obs.reward <= 0.60, f"Expected reward in [0.40, 0.60], got {obs.reward}"
+        # Generic payload: base(0.35) + minimal similarity + no keyword bonuses → ~0.35-0.45
+        assert 0.30 <= obs.reward <= 0.50, f"Expected reward in [0.30, 0.50], got {obs.reward}"
         assert obs.done is True
-        _record(test_name, True, f"reward={obs.reward}")
+        _record(test_name, True, f"reward={obs.reward:.3f}")
 
 
 async def test_hard_wrong_action():
@@ -255,6 +276,81 @@ async def test_hard_wrong_action():
         assert obs.reward == 0.01, f"Expected 0.01 (clamped), got {obs.reward}"
         assert obs.done is True
         _record(test_name, True, f"reward={obs.reward}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STATE MANAGEMENT TESTS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+async def test_reset_clean_state():
+    """Verify that reset() fully clears state from a previous episode."""
+    import websockets
+
+    test_name = "reset_clean_state"
+    async with websockets.connect(WS_URL, open_timeout=WS_TIMEOUT) as ws:
+        # Run a complete easy episode
+        await ws.send(json.dumps({"type": "reset", "data": {"task_name": "easy"}}))
+        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
+        obs = parse_obs(resp["data"])
+        assert obs.explicit_help_request is True  # easy task
+
+        action = ContextAction(action_type="summarize_screen", payload="summary")
+        await ws.send(json.dumps({"type": "step", "data": action.model_dump()}))
+        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
+        obs = parse_obs(resp["data"])
+        assert obs.done is True  # episode finished
+
+        # Now reset to medium — state should be completely fresh
+        await ws.send(json.dumps({"type": "reset", "data": {"task_name": "medium"}}))
+        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
+        obs = parse_obs(resp["data"])
+
+        assert obs.done is False, "Fresh episode should not be done"
+        assert obs.reward == 0.0, "Fresh episode should have zero reward"
+        assert obs.explicit_help_request is False, "Medium task: no help request"
+        assert obs.error_count == 0, "Medium task: no errors"
+
+        # First silent turn should work normally
+        action = ContextAction(action_type="stay_silent", payload="")
+        await ws.send(json.dumps({"type": "step", "data": action.model_dump()}))
+        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
+        obs = parse_obs(resp["data"])
+        assert 0.10 <= obs.reward <= 0.40, f"First turn reward {obs.reward} not in range"
+        assert obs.done is False, "Medium: should not be done after 1 turn"
+
+        _record(test_name, True, "state fully cleared between episodes")
+
+
+async def test_step_after_done():
+    """Verify that stepping after an episode ends returns zero reward."""
+    import websockets
+
+    test_name = "step_after_done"
+    async with websockets.connect(WS_URL, open_timeout=WS_TIMEOUT) as ws:
+        # Complete an easy episode
+        await ws.send(json.dumps({"type": "reset", "data": {"task_name": "easy"}}))
+        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
+
+        action = ContextAction(action_type="summarize_screen", payload="summary here")
+        await ws.send(json.dumps({"type": "step", "data": action.model_dump()}))
+        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
+        obs = parse_obs(resp["data"])
+        assert obs.done is True
+
+        # Try stepping again — should get zero reward, done=True
+        await ws.send(json.dumps({"type": "step", "data": action.model_dump()}))
+        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=WS_TIMEOUT))
+        obs = parse_obs(resp["data"])
+        assert obs.done is True, "Should still be done"
+        assert obs.reward == 0.0, f"Expected 0.0 reward after done, got {obs.reward}"
+
+        _record(test_name, True, "zero reward returned after episode end")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ENDPOINT TESTS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 async def test_health_endpoint():
@@ -299,6 +395,9 @@ ALL_TESTS = [
     test_medium_interrupted,
     test_hard_generic_payload,
     test_hard_wrong_action,
+    # State management tests
+    test_reset_clean_state,
+    test_step_after_done,
     # Endpoint tests
     test_health_endpoint,
     test_root_endpoint,
@@ -335,7 +434,7 @@ async def main():
         print("    python -m uvicorn server.app:app --host 0.0.0.0 --port 8000")
         print("")
         print("-" * 60)
-        print("  0/0 tests run -- SERVER UNREACHABLE")
+        print("  0/0 tests run — SERVER UNREACHABLE")
         print("-" * 60 + "\n")
         sys.exit(1)
 
@@ -355,7 +454,7 @@ async def main():
     passed = sum(1 for _, ok, _ in _results if ok)
     total = len(_results)
     status = "ALL PASSED" if passed == total else f"{total - passed} FAILED"
-    print(f"  {passed}/{total} tests passed -- {status}")
+    print(f"  {passed}/{total} tests passed — {status}")
     print("-" * 60 + "\n")
 
     if passed < total:

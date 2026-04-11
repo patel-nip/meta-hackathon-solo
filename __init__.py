@@ -43,6 +43,12 @@ try:
         ContextState,
     )
     from context_aware_env.client import ContextEnvClient
+    from context_aware_env.utils import (
+        clamp_score,
+        fuzzy_match_score,
+        weighted_keyword_score,
+        SCORE_EPSILON,
+    )
 except ImportError:
     try:
         from models import (  # type: ignore[no-redef]
@@ -51,6 +57,12 @@ except ImportError:
             ContextState,
         )
         from client import ContextEnvClient  # type: ignore[no-redef]
+        from utils import (  # type: ignore[no-redef]
+            clamp_score,
+            fuzzy_match_score,
+            weighted_keyword_score,
+            SCORE_EPSILON,
+        )
     except ImportError:
         # If we can't import at all (e.g. during pip install resolution),
         # don't crash the package init.
@@ -66,4 +78,9 @@ __all__ = [
     "ContextState",
     # Client
     "ContextEnvClient",
+    # Utilities
+    "clamp_score",
+    "fuzzy_match_score",
+    "weighted_keyword_score",
+    "SCORE_EPSILON",
 ]

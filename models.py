@@ -99,6 +99,12 @@ class ContextObservation(Observation):
         Behavioural signal from the user (e.g. ``"idle"``, ``"typing_fast"``).
     explicit_help_request : bool
         Whether the user has explicitly asked for help.
+    mouse_activity : str
+        Specific mouse behaviour (e.g. ``"stationary"``, ``"erratic_clicking"``).
+    recent_keystrokes_per_minute : int
+        Quantified typing speed (keystrokes per minute).
+    error_count : int
+        Number of error messages visible on screen.
     """
 
     model_config = {"extra": "forbid"}
@@ -118,6 +124,18 @@ class ContextObservation(Observation):
     explicit_help_request: bool = Field(
         default=False,
         description="Whether the user has explicitly asked for help.",
+    )
+    mouse_activity: str = Field(
+        default="none",
+        description="Specific mouse behaviour (e.g. 'stationary', 'scrolling', 'erratic_clicking').",
+    )
+    recent_keystrokes_per_minute: int = Field(
+        default=0,
+        description="Quantified typing speed — keystrokes per minute in the last 30 seconds.",
+    )
+    error_count: int = Field(
+        default=0,
+        description="Number of error messages currently visible on the user's screen.",
     )
 
 

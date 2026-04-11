@@ -9,9 +9,9 @@ Task Tiers
 ----------
 **Easy** – User explicitly requests help → agent should ``summarize_screen``.
 **Medium** – User is in deep work (typing fast) → agent should ``stay_silent``
-             for 5 consecutive turns (total reward 1.0).
-**Hard** – User is silently frustrated (npm error, erratic mouse) → agent
-           should ``proactive_help`` and mention the specific error.
+             for 5 consecutive turns (total reward ~0.95).
+**Hard** – User is silently frustrated (npm build error, erratic mouse) → agent
+           should ``proactive_help`` and mention the specific error details.
 
 Design Decisions
 ----------------
@@ -20,11 +20,12 @@ Design Decisions
 * ``MAX_STEPS_PER_EPISODE`` prevents runaway agents from looping forever.
 * Invalid ``task_name`` raises a ``ValueError`` rather than silently
   falling back to ``"easy"``.
+* Scoring uses a combination of fuzzy matching and weighted keyword
+  detection for fine-grained, continuous reward signals.
 """
 
 from __future__ import annotations
 
-import difflib
 import hashlib
 import logging
 import random
@@ -35,8 +36,8 @@ from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State as BaseState  # noqa: F401
 
 # ---------------------------------------------------------------------------
-# Import models using proper package path, with a local-fallback so the
-# file still works when executed directly from the project root.
+# Import models and utilities using proper package path, with a local-fallback
+# so the file still works when executed directly from the project root.
 # ---------------------------------------------------------------------------
 try:
     from context_aware_env.models import (
@@ -44,10 +45,22 @@ try:
         ContextObservation,
         ContextState,
     )
+    from context_aware_env.utils import (
+        SCORE_EPSILON,
+        clamp_score,
+        fuzzy_match_score,
+        weighted_keyword_score,
+    )
 except ImportError:
     import sys, os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from models import ContextAction, ContextObservation, ContextState  # type: ignore[no-redef]
+    from utils import (  # type: ignore[no-redef]
+        SCORE_EPSILON,
+        clamp_score,
+        fuzzy_match_score,
+        weighted_keyword_score,
+    )
 
 
 logger = logging.getLogger(__name__)
@@ -61,56 +74,82 @@ MAX_STEPS_PER_EPISODE: int = 20
 MEDIUM_SILENT_TURNS_REQUIRED: int = 5
 """Number of consecutive silent turns needed to complete the 'medium' task."""
 
-SCORE_EPSILON: float = 0.01
-"""Small offset to keep scores strictly inside (0, 1) as required by the
-Meta x Scaler evaluation platform."""
-
-
-def fuzzy_match_score(predicted: str, reference: str) -> float:
-    """Calculate a continuous string similarity score between 0.0 and 1.0."""
-    if not predicted:
-        return 0.0
-    return difflib.SequenceMatcher(None, predicted.lower(), reference.lower()).ratio()
-
-
-def _clamp_score(raw: float) -> float:
-    """Clamp *raw* into the open interval (0, 1).
-
-    The grading pipeline rejects scores that are exactly 0.0 or 1.0,
-    so we nudge boundary values inward by ``SCORE_EPSILON``.
-    """
-    if raw <= 0.0:
-        return SCORE_EPSILON
-    if raw >= 1.0:
-        return 1.0 - SCORE_EPSILON
-    return raw
-
 
 # ── Task presets ──────────────────────────────────────────────────────────────
+#
+# Each preset simulates a realistic desktop scenario.  The visible_text
+# contains actual content one would see on screen, not placeholder strings.
 
 TASK_PRESETS: dict[str, dict[str, Any]] = {
     "easy": {
-        "active_app": "YouTube",
-        "visible_text": "Video: React Tutorial",
+        "active_app": "YouTube — Google Chrome",
+        "visible_text": (
+            "React Tutorial for Beginners — Full Course 2024\n"
+            "freeCodeCamp.org · 1.2M views · 8 months ago\n"
+            "Learn React JS in this comprehensive tutorial for beginners.\n"
+            "Covers components, hooks, state management, and routing.\n"
+            "Timestamps: 0:00 Intro | 5:30 Setup | 12:00 Components | 25:00 Hooks"
+        ),
         "user_telemetry": "idle",
         "explicit_help_request": True,
+        "mouse_activity": "stationary",
+        "recent_keystrokes_per_minute": 0,
+        "error_count": 0,
     },
     "medium": {
-        "active_app": "VS Code",
-        "visible_text": "def main():\n    config = load_config()",
+        "active_app": "VS Code — project/src/main.py",
+        "visible_text": (
+            "import logging\n"
+            "from pathlib import Path\n"
+            "\n"
+            "logger = logging.getLogger(__name__)\n"
+            "\n"
+            "def load_config(path: str) -> dict:\n"
+            '    """Load configuration from a YAML file."""\n'
+            "    config_path = Path(path)\n"
+            "    if not config_path.exists():\n"
+            '        raise FileNotFoundError(f"Config not found: {path}")'
+        ),
         "user_telemetry": "typing_moderate",
         "explicit_help_request": False,
+        "mouse_activity": "minimal",
+        "recent_keystrokes_per_minute": 45,
+        "error_count": 0,
     },
     "hard": {
-        "active_app": "Terminal",
-        "visible_text": "npm ERR! code ELIFECYCLE",
+        "active_app": "Terminal — zsh",
+        "visible_text": (
+            "$ npm run build\n"
+            "\n"
+            "> my-app@2.1.0 build\n"
+            "> react-scripts build\n"
+            "\n"
+            "Creating an optimized production build...\n"
+            "Failed to compile.\n"
+            "\n"
+            "Module not found: Error: Can't resolve './components/Dashboard'\n"
+            "  in '/home/user/my-app/src/pages'\n"
+            "\n"
+            "npm ERR! code ELIFECYCLE\n"
+            "npm ERR! errno 1\n"
+            "npm ERR! my-app@2.1.0 build: `react-scripts build`\n"
+            "npm ERR! Exit status 1\n"
+            "npm ERR!\n"
+            "npm ERR! Failed at the my-app@2.1.0 build script.\n"
+            "npm ERR! This is probably not a problem with npm.\n"
+            "npm ERR! There is likely additional logging output above."
+        ),
         "user_telemetry": "erratic_mouse",
         "explicit_help_request": False,
+        "mouse_activity": "erratic_clicking",
+        "recent_keystrokes_per_minute": 5,
+        "error_count": 3,
     },
 }
 
 VALID_TASK_NAMES: frozenset[str] = frozenset(TASK_PRESETS.keys())
 """Immutable set of all valid task-name strings."""
+
 
 # ── Medium task: evolving coding-session contexts ─────────────────────────────
 #
@@ -120,35 +159,112 @@ VALID_TASK_NAMES: frozenset[str] = frozenset(TASK_PRESETS.keys())
 # current context rather than from a fixed formula.
 
 MEDIUM_STEP_CONTEXTS: list[dict[str, Any]] = [
-    {   # Turn 1 — session just started, user warming up
-        "active_app": "VS Code",
-        "visible_text": "def main():\n    config = load_config()",
+    {   # Turn 1 — session starting, setting up imports and config loader
+        "active_app": "VS Code — project/src/main.py",
+        "visible_text": (
+            "import logging\n"
+            "from pathlib import Path\n"
+            "\n"
+            "logger = logging.getLogger(__name__)\n"
+            "\n"
+            "def load_config(path: str) -> dict:\n"
+            '    """Load configuration from a YAML file."""\n'
+            "    config_path = Path(path)\n"
+            "    if not config_path.exists():\n"
+            '        raise FileNotFoundError(f"Config not found: {path}")'
+        ),
         "user_telemetry": "typing_moderate",
         "explicit_help_request": False,
+        "mouse_activity": "minimal",
+        "recent_keystrokes_per_minute": 45,
+        "error_count": 0,
     },
-    {   # Turn 2 — user writing a class, picking up speed
-        "active_app": "VS Code",
-        "visible_text": "class DataProcessor:\n    def __init__(self, config):\n        self.pipeline = []",
+    {   # Turn 2 — writing a data processor class, picking up speed
+        "active_app": "VS Code — project/src/processor.py",
+        "visible_text": (
+            "class DataProcessor:\n"
+            '    """Process and validate incoming data records."""\n'
+            "\n"
+            "    def __init__(self, config: dict, batch_size: int = 32):\n"
+            "        self.config = config\n"
+            "        self.batch_size = batch_size\n"
+            "        self._pipeline: list[Callable] = []\n"
+            "        self._error_count = 0\n"
+            "\n"
+            "    def add_stage(self, fn: Callable) -> 'DataProcessor':\n"
+            "        self._pipeline.append(fn)\n"
+            "        return self"
+        ),
         "user_telemetry": "typing_fast",
         "explicit_help_request": False,
+        "mouse_activity": "none",
+        "recent_keystrokes_per_minute": 78,
+        "error_count": 0,
     },
-    {   # Turn 3 — brief pause to think, then resumes
-        "active_app": "VS Code",
-        "visible_text": "# TODO: refactor this section\ndef process(data, pipeline):\n    results = []",
+    {   # Turn 3 — writing transform logic, brief pause to think
+        "active_app": "VS Code — project/src/transforms.py",
+        "visible_text": (
+            "def normalize_record(record: dict) -> dict:\n"
+            '    """Normalize field names and validate types."""\n'
+            "    normalized = {}\n"
+            "    for key, value in record.items():\n"
+            "        clean_key = key.strip().lower().replace(' ', '_')\n"
+            "        if isinstance(value, str):\n"
+            "            value = value.strip()\n"
+            "        normalized[clean_key] = value\n"
+            "    return normalized\n"
+            "\n"
+            "# TODO: add schema validation step"
+        ),
         "user_telemetry": "brief_pause",
         "explicit_help_request": False,
+        "mouse_activity": "scrolling",
+        "recent_keystrokes_per_minute": 32,
+        "error_count": 0,
     },
-    {   # Turn 4 — deep in a loop, high focus
-        "active_app": "VS Code",
-        "visible_text": "for item in dataset:\n    result = transform(item, weights)\n    validated.append(result)",
+    {   # Turn 4 — deep in async processing loop, high focus
+        "active_app": "VS Code — project/src/processor.py",
+        "visible_text": (
+            "    async def process_batch(self, records: list[dict]) -> BatchResult:\n"
+            '        """Process a batch through the pipeline."""\n'
+            "        results: list[dict] = []\n"
+            "        errors: list[ProcessingError] = []\n"
+            "        for record in records:\n"
+            "            try:\n"
+            "                for stage in self._pipeline:\n"
+            "                    record = await stage(record)\n"
+            "                results.append(record)\n"
+            "            except ValidationError as exc:\n"
+            "                errors.append(ProcessingError(record=record, error=exc))\n"
+            "        return BatchResult(results=results, errors=errors)"
+        ),
         "user_telemetry": "typing_fast",
         "explicit_help_request": False,
+        "mouse_activity": "none",
+        "recent_keystrokes_per_minute": 92,
+        "error_count": 0,
     },
-    {   # Turn 5 — peak flow, complex async code
-        "active_app": "VS Code",
-        "visible_text": "async def fetch_batch(urls: list[str]) -> list[dict]:\n    async with aiohttp.ClientSession() as session:",
+    {   # Turn 5 — peak flow, complex orchestration with concurrency control
+        "active_app": "VS Code — project/src/orchestrator.py",
+        "visible_text": (
+            "async def run_pipeline(\n"
+            "    source: AsyncIterator[dict],\n"
+            "    processor: DataProcessor,\n"
+            "    sink: DataSink,\n"
+            "    max_concurrency: int = 4,\n"
+            ") -> PipelineResult:\n"
+            '    """Execute the full ETL pipeline with controlled concurrency."""\n'
+            "    semaphore = asyncio.Semaphore(max_concurrency)\n"
+            "    async def bounded_process(batch):\n"
+            "        async with semaphore:\n"
+            "            return await processor.process_batch(batch)\n"
+            "    tasks = [bounded_process(b) async for b in batched(source, 32)]"
+        ),
         "user_telemetry": "typing_burst",
         "explicit_help_request": False,
+        "mouse_activity": "none",
+        "recent_keystrokes_per_minute": 110,
+        "error_count": 0,
     },
 ]
 
@@ -159,6 +275,40 @@ TYPING_INTENSITY_SCORES: dict[str, float] = {
     "typing_fast":     0.70,
     "brief_pause":     0.50,   # ambiguous — harder to stay silent
     "typing_burst":    0.90,
+}
+
+
+# ── Easy task: keyword relevance weights ──────────────────────────────────────
+#
+# Used alongside fuzzy matching to give fine-grained partial credit
+# when the agent mentions relevant terms from the screen context.
+
+EASY_KEYWORDS: dict[str, float] = {
+    "react": 0.04,
+    "tutorial": 0.04,
+    "youtube": 0.03,
+    "video": 0.02,
+    "help": 0.02,
+}
+
+# ── Hard task: multi-signal scoring weights ───────────────────────────────────
+#
+# Critical keywords: mentioning the technology and error type
+HARD_CRITICAL_KEYWORDS: dict[str, float] = {
+    "npm": 0.05,
+    "error": 0.05,
+    "elifecycle": 0.06,
+    "build": 0.04,
+}
+
+# Specificity keywords: mentioning the exact root cause
+HARD_SPECIFICITY_KEYWORDS: dict[str, float] = {
+    "dashboard": 0.05,
+    "module": 0.04,
+    "resolve": 0.03,
+    "component": 0.03,
+    "import": 0.02,
+    "path": 0.02,
 }
 
 
@@ -320,21 +470,26 @@ class ContextAwareEnvironment(
         #
         # The user is watching a YouTube tutorial and has explicitly asked
         # for help.  The correct response is to summarize the screen.
-        # Any other action scores zero.
+        # Scoring combines fuzzy similarity + keyword relevance + length.
         if task == "easy":
             if action.action_type == "summarize_screen":
-                base_reward = 0.4
-                # similarity gives up to 0.4
+                base_reward = 0.40
+
+                # Fuzzy similarity to ideal summary (up to 0.30)
                 sim_score = fuzzy_match_score(
-                    action.payload, 
-                    "watching react tutorial video on youtube"
-                ) * 0.4
-                
-                # word count penalty if too short or too long
+                    action.payload,
+                    "user watching react tutorial video on youtube needs help understanding"
+                ) * 0.30
+
+                # Keyword relevance bonuses (up to 0.15)
+                kwd_score = weighted_keyword_score(action.payload, EASY_KEYWORDS)
+                kwd_score = min(kwd_score, 0.15)
+
+                # Length quality — prefer 5–30 word responses
                 length = len(action.payload.split())
-                len_bonus = 0.2 if 5 <= length <= 25 else 0.0
-                
-                reward = base_reward + sim_score + len_bonus
+                len_bonus = 0.15 if 5 <= length <= 30 else 0.0
+
+                reward = base_reward + sim_score + kwd_score + len_bonus
             else:
                 reward = 0.0
             done = True
@@ -376,29 +531,44 @@ class ContextAwareEnvironment(
 
         # ── Hard: Unspoken Frustration ────────────────────────────────────
         #
-        # The terminal shows ``npm ERR!`` and the user has erratic mouse
-        # movement (frustrated) but hasn't asked for help.  The correct
-        # action is ``proactive_help`` with a payload that mentions the
-        # specific error.
+        # The terminal shows a real ``npm run build`` failure with an
+        # ``ELIFECYCLE`` error and a missing ``Dashboard`` component.
+        # The user has erratic mouse movement (frustrated) but hasn't
+        # asked for help.
         #
-        # Scoring is dynamic for continuous variance:
-        #   - base score + fuzzy match + keyword checks
+        # Scoring uses multi-signal analysis:
+        #   - base score
+        #   - fuzzy similarity to ideal response
+        #   - critical keyword detection (npm, error, elifecycle, build)
+        #   - specificity bonus (dashboard, module, resolve, component)
+        #
+        # This makes the task genuinely challenging for frontier models:
+        # they must parse noisy terminal output and craft a specific
+        # response referencing the root cause, not just generic help.
         elif task == "hard":
             if action.action_type == "proactive_help":
-                base_reward = 0.4
+                base_reward = 0.35
+
+                # Fuzzy similarity to ideal response (up to 0.25)
                 sim_score = fuzzy_match_score(
-                    action.payload, 
-                    "npm error code elifecycle in terminal"
-                ) * 0.4
-                
-                payload_lower = action.payload.lower()
-                kwd_bonus = 0.0
-                if "npm" in payload_lower: 
-                    kwd_bonus += 0.1
-                if "error" in payload_lower or "err" in payload_lower: 
-                    kwd_bonus += 0.1
-                
-                reward = base_reward + sim_score + kwd_bonus
+                    action.payload,
+                    "npm build failed with ELIFECYCLE error because module "
+                    "Dashboard cannot be resolved check import path"
+                ) * 0.25
+
+                # Critical keyword detection (up to 0.20)
+                kwd_score = weighted_keyword_score(
+                    action.payload, HARD_CRITICAL_KEYWORDS
+                )
+                kwd_score = min(kwd_score, 0.20)
+
+                # Specificity bonus — mentioning the exact root cause (up to 0.15)
+                specificity = weighted_keyword_score(
+                    action.payload, HARD_SPECIFICITY_KEYWORDS
+                )
+                specificity = min(specificity, 0.15)
+
+                reward = base_reward + sim_score + kwd_score + specificity
             else:
                 reward = 0.0
             done = True
@@ -410,7 +580,7 @@ class ContextAwareEnvironment(
             done = True
 
         # ── Finalise ──────────────────────────────────────────────────────
-        reward = _clamp_score(reward)
+        reward = clamp_score(reward)
         self._episode_done = done
 
         logger.debug(
@@ -437,32 +607,32 @@ class ContextAwareEnvironment(
         Instead of hardcoding standard rewards per turn, we evaluate:
           1. Base momentum: deeper into the session = more value in staying silent.
           2. Typing intensity: high focus (fast/burst) increases the reward.
-          3. Code complexity heuristcs: longer/nested code indicates higher cognitive load.
+          3. Code complexity heuristics: longer/nested code indicates higher
+             cognitive load.
           4. Small deterministic pseudo-random noise for natural scoring variance.
         """
         # 1. Base momentum from how long they've been working (turn index 1-5)
         momentum_score = turn * 0.02
-        
+
         # 2. Typing intensity from telemetry
         telemetry = obs_kwargs.get("user_telemetry", "idle")
         intensity = TYPING_INTENSITY_SCORES.get(telemetry, 0.1) * 0.05
-        
+
         # 3. Code complexity heuristics (lines, indentations)
         code = obs_kwargs.get("visible_text", "")
         lines = code.count("\n") + 1
         indents = code.count("    ")
-        complexity = min((lines * 0.01) + (indents * 0.015), 0.08)
-        
+        complexity = min((lines * 0.01) + (indents * 0.015), 0.07)
+
         # 4. Small pseudo-random noise based on episode ID (deterministic variance)
         # Using md5 hash of episode_id to get a float between 0.0 and 0.01
         hash_digest = hashlib.md5(f"{self._state.episode_id}_{turn}".encode()).hexdigest()
-        noise = (int(hash_digest[:4], 16) / 65535.0) * 0.02
-        
+        noise = (int(hash_digest[:4], 16) / 65535.0) * 0.01
+
         # Combine metrics into final reward
-        # Base starts around 0.10, scales up to ~0.25 based on momentum and complexity
-        base_reward = 0.08
+        base_reward = 0.06
         final_reward = base_reward + momentum_score + intensity + complexity + noise
-        
+
         logger.debug(
             "Computed medium reward: turn=%d -> momentum=%.3f intensity=%.3f complexity=%.3f noise=%.3f -> %.3f",
             turn, momentum_score, intensity, complexity, noise, final_reward
